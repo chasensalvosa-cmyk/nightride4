@@ -37,6 +37,8 @@ export async function POST(req: Request) {
       createdAt: profile.createdAt.toISOString(),
     },
   })
-  res.cookies.set(SESSION_COOKIE, token, sessionCookieOptions())
+  // req-aware attributes: SameSite=None; Secure over HTTPS so the session
+  // survives being loaded inside the preview iframe.
+  res.cookies.set(SESSION_COOKIE, token, sessionCookieOptions(undefined, req))
   return res
 }

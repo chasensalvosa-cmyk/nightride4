@@ -18,6 +18,8 @@ import { MapSearch } from './MapSearch'
 import { MapLegend } from './MapLegend'
 import { LocationPanel, type MapSelection } from './LocationPanel'
 import { MarkerRenderer, type MapMarkerData } from './MarkerRenderer'
+import { RouteOverlay } from './RouteOverlay'
+import { RoutePanel } from './RoutePanel'
 import { ReportSheet, type ReportDraft } from './ReportSheet'
 import { SaveLocationDialog, type SaveLocationDraft } from '@/components/shared/save-location-dialog'
 import { FlagDialog } from '@/components/shared/flag-dialog'
@@ -30,6 +32,7 @@ import { useGeolocation } from '@/hooks/use-geolocation'
 import { useRealtime } from '@/hooks/use-realtime'
 import { fetchReports, confirmReport } from '@/services/community/communityService'
 import { fetchChargingStations } from '@/services/map/chargingService'
+import { fetchRoute } from '@/services/map/routingService'
 import { fetchAviation } from '@/services/aviation/aviationService'
 import { fetchCameras } from '@/services/cameras/cameraService'
 import { fetchApiStatus } from '@/services/publicSafety/apiStatusService'
@@ -73,9 +76,17 @@ export default function MapView() {
   const [flagTarget, setFlagTarget] = useState<string | null>(null)
   const [flagOpen, setFlagOpen] = useState(false)
   const [locating, setLocating] = useState(false)
+  const [routeDestination, setRouteDestination] = useState<{
+    lat: number
+    lng: number
+    label?: string
+  } | null>(null)
+  const [activeRouteIdx, setActiveRouteIdx] = useState(0)
   const deepLinkApplied = useRef(false)
 
-  const geo = useGeolocation({ auto: false })
+  // GPS: auto-start on mount — the browser asks for permission once, then the
+  // red own-position dot follows the rider. Presence *sharing* stays opt-in.
+  const geo = useGeolocation({ auto: true })
   const sharingPresence = useRealtimeStore((s) => s.sharingPresence)
   const setSharingPresence = useRealtimeStore((s) => s.setSharingPresence)
   const realtimeConnected = useRealtimeStore((s) => s.connected)
@@ -107,6 +118,26 @@ export default function MapView() {
       }
     }
   }, [searchParams, mapInstance])
+
+  // ------------------------------------------------------------ auto-center on first fix
+  // When the rider opens the map, snap the view to their real position once
+  // (unless the URL deep-links to specific coordinates). Later pans win.
+  const centeredOnFix = useRef(false)
+  const deepLinkCoords =
+    searchParams.has('lat') && searchParams.has('lng')
+  useEffect(() => {
+    if (centeredOnFix.current || !geo.coords || !mapInstance) return
+    if (deepLinkCoords) {
+      centeredOnFix.current = true
+      return
+    }
+    centeredOnFix.current = true
+    mapInstance.flyTo({
+      center: [geo.coords.lng, geo.coords.lat],
+      zoom: Math.max(view.zoom, 13),
+      duration: 900,
+    })
+  }, [geo.coords, mapInstance, view.zoom, deepLinkCoords])
 
   const mapApiRef = useRef<MLMap | null>(null)
   const handleMapReady = useCallback((map: MLMap) => {
@@ -176,6 +207,32 @@ export default function MapView() {
     refetchInterval: 60_000,
     staleTime: 45_000,
   })
+
+  // ------------------------------------------------------------ fastest routes
+  // Origin = live GPS (3 dp ≈ 110 m granularity avoids refetch spam while the
+  // watcher ticks). Destination changes or rider movement > ~110 m trigger a
+  // reroute; the panel always re-selects the fastest option on new data.
+  const originKey = geo.coords
+    ? `${geo.coords.lat.toFixed(3)},${geo.coords.lng.toFixed(3)}`
+    : null
+  const destKey = routeDestination
+    ? `${routeDestination.lat.toFixed(5)},${routeDestination.lng.toFixed(5)}`
+    : null
+  const routeQuery = useQuery({
+    queryKey: ['route', originKey, destKey],
+    queryFn: () =>
+      fetchRoute(
+        { lat: geo.coords!.lat, lng: geo.coords!.lng },
+        { lat: routeDestination!.lat, lng: routeDestination!.lng },
+      ),
+    enabled: !!originKey && !!destKey,
+    staleTime: 30_000,
+    retry: 1,
+  })
+  const routeOptions = useMemo(() => routeQuery.data?.data ?? [], [routeQuery.data])
+  useEffect(() => {
+    setActiveRouteIdx(0)
+  }, [routeQuery.data])
 
   // Realtime → refresh layer data when community events arrive.
   useRealtime({
@@ -371,7 +428,7 @@ export default function MapView() {
     }
   }, [stopPresence])
 
-  // ------------------------------------------------------------ GPS + recenter
+  // ------------------------------------------------------------ GPS + recenter + routing
   const recenter = useCallback(async () => {
     setLocating(true)
     try {
@@ -391,6 +448,33 @@ export default function MapView() {
       setLocating(false)
     }
   }, [geo.coords, geo.error, mapInstance, view.zoom])
+
+  /** Choose a destination → plan fastest routes from the rider's live
+   *  position (asks for a one-shot fix if none exists yet). */
+  const routeHere = useCallback(
+    async (lat: number, lng: number, label?: string) => {
+      let origin = geo.coords
+      if (!origin) {
+        setLocating(true)
+        try {
+          origin = await geo.requestOnce()
+        } finally {
+          setLocating(false)
+        }
+      }
+      if (!origin) {
+        toast.error('Cannot plan a route', {
+          description:
+            geo.error ?? 'Grant location permission so the route can start from your position.',
+        })
+        return
+      }
+      geo.start()
+      setActiveRouteIdx(0)
+      setRouteDestination({ lat, lng, label })
+    },
+    [geo.coords, geo.error, geo.requestOnce, geo.start],
+  )
 
   // ------------------------------------------------------------ report / save / confirm / flag
   const openReport = useCallback(
@@ -463,10 +547,13 @@ export default function MapView() {
         {/* top-left: search + status */}
         <div className="absolute left-3 top-3 z-10 flex w-[calc(100%-9rem)] max-w-xs flex-col gap-2 md:w-80">
           <MapSearch
+            userLocation={geo.coords}
             onSelect={(r) => {
               setSelectedMarkerId(null)
               mapInstance?.flyTo({ center: [r.longitude, r.latitude], zoom: 14, duration: 900 })
               setSelection({ kind: 'point', lat: r.latitude, lng: r.longitude })
+              // choosing a searched place = choosing a destination → route it
+              void routeHere(r.latitude, r.longitude, r.label)
             }}
           />
           <div className="pointer-events-auto rounded-lg border border-border bg-panel/95 px-3 py-2 backdrop-blur-sm">
@@ -500,6 +587,27 @@ export default function MapView() {
             )}
           </div>
 
+          {/* fastest-route options (all viewports) */}
+          {routeDestination && (
+            <RoutePanel
+              destination={routeDestination}
+              routes={routeOptions}
+              activeIndex={activeRouteIdx}
+              onSelect={setActiveRouteIdx}
+              onClear={() => {
+                setRouteDestination(null)
+                setActiveRouteIdx(0)
+              }}
+              fetching={routeQuery.isFetching}
+              freshness={routeQuery.data?.freshness ?? 'unavailable'}
+              note={routeQuery.data?.note}
+              attribution={
+                routeQuery.data?.attribution ??
+                'Routing © OpenStreetMap contributors, ODbL — OSRM'
+              }
+            />
+          )}
+
           {/* location details (desktop) */}
           {selection && (
             <div className="hidden md:block">
@@ -514,6 +622,7 @@ export default function MapView() {
                   setSaveDraft({ lat, lng, label })
                   setSaveOpen(true)
                 }}
+                onRouteHere={routeHere}
                 onConfirmReport={(id) => confirmMutation.mutate(id)}
                 onFlagReport={(id) => {
                   setFlagTarget(id)
@@ -567,6 +676,7 @@ export default function MapView() {
                 setSaveDraft({ lat, lng, label })
                 setSaveOpen(true)
               }}
+              onRouteHere={routeHere}
               onConfirmReport={(id) => confirmMutation.mutate(id)}
               onFlagReport={(id) => {
                 setFlagTarget(id)
@@ -590,6 +700,15 @@ export default function MapView() {
         )}
 
         <MarkerRenderer map={mapInstance} markers={markers} />
+        {routeDestination && (
+          <RouteOverlay
+            map={mapInstance}
+            routes={routeOptions}
+            activeIndex={activeRouteIdx}
+            destination={routeDestination}
+            fitKey={`${destKey ?? ''}:${activeRouteIdx}`}
+          />
+        )}
       </MapContainer>
 
       <ReportSheet open={reportOpen} draft={reportDraft} onOpenChange={setReportOpen} />

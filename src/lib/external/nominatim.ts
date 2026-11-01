@@ -2,8 +2,15 @@
 // Server-proxied (never called from the browser) with the mandatory custom
 // User-Agent, a >=1.1 s min-interval guard (usage policy: max 1 req/s) and
 // long-lived response caching. Used for map search + reverse geocoding.
+//
+// Forward search supports a `near` bias: when the rider has a GPS fix the
+// query is boxed to ~±35 km around them (bounded=1) so matches are the
+// places closest to the rider, then sorted by real great-circle distance.
+// If the strict box finds nothing, the same box demotes to a rank hint
+// (bounded=0) so obscure names still resolve — honestly, further away.
 
 import { fetchJson } from './http'
+import { bboxAround, haversineMeters } from '@/lib/geo'
 
 const BASE_URL = 'https://nominatim.openstreetmap.org'
 const UA = 'NIGHTRIDE/1.0 (e-moto platform; map search)'
@@ -28,15 +35,29 @@ interface NominatimPlace {
   address?: Record<string, string>
 }
 
-export async function geocode(query: string): Promise<
-  { id: string; label: string; detail: string; latitude: number; longitude: number; type: string }[]
-> {
+export interface GeocodeMatch {
+  id: string
+  label: string
+  detail: string
+  latitude: number
+  longitude: number
+  type: string
+  /** meters from the `near` origin, present only for biased searches */
+  distanceMeters?: number | null
+}
+
+async function search(url: string): Promise<NominatimPlace[]> {
   await throttle()
-  const data = await fetchJson<NominatimPlace[]>(
-    `${BASE_URL}/search?q=${encodeURIComponent(query)}&format=json&limit=6&addressdetails=1`,
-    { headers: { 'User-Agent': UA }, timeoutMs: 8000, retries: 1 },
-  )
-  return (data ?? [])
+  const data = await fetchJson<NominatimPlace[]>(url, {
+    headers: { 'User-Agent': UA },
+    timeoutMs: 8000,
+    retries: 1,
+  })
+  return data ?? []
+}
+
+function toMatches(places: NominatimPlace[]): GeocodeMatch[] {
+  return places
     .map((p) => {
       const lat = Number.parseFloat(p.lat)
       const lng = Number.parseFloat(p.lon)
@@ -49,9 +70,37 @@ export async function geocode(query: string): Promise<
         latitude: lat,
         longitude: lng,
         type: p.type,
-      }
+      } satisfies GeocodeMatch
     })
-    .filter((r): r is NonNullable<typeof r> => r !== null)
+    .filter((r): r is GeocodeMatch => r !== null)
+}
+
+export async function geocode(
+  query: string,
+  near?: { lat: number; lng: number },
+): Promise<GeocodeMatch[]> {
+  const base = `${BASE_URL}/search?q=${encodeURIComponent(query)}&format=json&limit=8&addressdetails=1`
+
+  let places: NominatimPlace[]
+  if (near) {
+    const b = bboxAround(near.lat, near.lng, 35000)
+    const viewbox = `&viewbox=${b.minLng},${b.minLat},${b.maxLng},${b.maxLat}`
+    places = await search(`${base}${viewbox}&bounded=1`)
+    if (places.length === 0) {
+      places = await search(`${base}${viewbox}&bounded=0`)
+    }
+  } else {
+    places = await search(base)
+  }
+
+  const matches = toMatches(places)
+  if (near) {
+    for (const m of matches) {
+      m.distanceMeters = haversineMeters(near.lat, near.lng, m.latitude, m.longitude)
+    }
+    matches.sort((a, b) => (a.distanceMeters ?? 0) - (b.distanceMeters ?? 0))
+  }
+  return matches
 }
 
 export async function reverseGeocode(

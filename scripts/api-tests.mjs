@@ -108,6 +108,40 @@ async function main() {
   r = await c.get('/api/auth/me')
   check('me after logout is null', r.json.user === null)
 
+  // persistent login: the session cookie must survive reloads (no re-login)
+  {
+    const raw = await fetch(`${BASE}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: USER_A, password: 'testpass123' }),
+    })
+    const sc = (raw.headers.getSetCookie?.() ?? []).join(' ')
+    check(
+      'login cookie is HttpOnly with explicit SameSite',
+      /HttpOnly/i.test(sc) && /SameSite=(Lax|None)/i.test(sc),
+      sc.slice(0, 120),
+    )
+    const maxAge = sc.match(/Max-Age=(\d+)/i)
+    check(
+      'session lifetime ≥ 30 days',
+      !!maxAge && Number(maxAge[1]) >= 2_500_000,
+      maxAge?.[1] ?? 'none',
+    )
+  }
+  {
+    const keep = new Client()
+    await keep.post('/api/auth/login', { username: USER_A, password: 'testpass123' })
+    const token = keep.cookies.get('nightride_session')
+    // a brand-new client reusing only the cookie = browser reload / revisit
+    const reload = new Client()
+    reload.cookies.set('nightride_session', token)
+    r = await reload.get('/api/auth/me')
+    check(
+      'session survives reload — no logging in again and again',
+      r.status === 200 && r.json.user?.username === USER_A,
+    )
+  }
+
   // ------------------------------------------------------------ rides
   section('Ride tracking & persistence')
   r = await anon.post('/api/rides', {})
@@ -324,6 +358,66 @@ async function main() {
   check(
     'geocode: Nominatim results or honest unavailable state',
     r.status === 200 && (r.json.freshness === 'live' ? r.json.data.length > 0 : true),
+    `freshness=${r.json?.freshness}`,
+  )
+
+  // location-biased search: boxed to ±35 km of the rider, sorted by distance
+  // (uses a geocodable destination name — Nominatim is a geocoder, not a
+  // POI keyword engine, so generic words like “coffee” are meaningless to it)
+  r = await anon.get('/api/external/geocode?q=starbucks&lat=34.0522&lng=-118.2437')
+  check(
+    'biased geocode: results or honest unavailable state',
+    r.status === 200 && (r.json.freshness === 'live' ? r.json.data.length > 0 : true),
+    `freshness=${r.json?.freshness} count=${r.json?.data?.length}`,
+  )
+  if (r.json?.freshness === 'live' && r.json.data?.length) {
+    const dists = r.json.data.map((x) => x.distanceMeters)
+    check(
+      'biased results carry finite distances, sorted nearest-first',
+      dists.every((d) => Number.isFinite(d) && d >= 0) &&
+        dists.every((d, i) => i === 0 || dists[i - 1] <= d),
+      dists.slice(0, 4).join(', '),
+    )
+    check(
+      'biased results are local (nearest ≤ 40 km)',
+      dists[0] <= 40000,
+      `nearest=${Math.round(dists[0])} m`,
+    )
+  }
+
+  // fastest routes (OSRM): real geometry, sorted by time, or honest state
+  r = await anon.get('/api/external/route?from=34.0522,-118.2437&to=34.1181,-118.3001')
+  check(
+    'route: OSRM routes or honest unavailable state',
+    r.status === 200 && (r.json.freshness === 'live' ? (r.json.data?.length ?? 0) > 0 : true),
+    `freshness=${r.json?.freshness} note=${r.json?.note ?? ''}`,
+  )
+  if (r.json?.freshness === 'live' && r.json.data?.length) {
+    const [first, second] = r.json.data
+    check(
+      'route[0] is fastest with real distance/duration/geometry',
+      first.durationSeconds > 0 &&
+        first.distanceMeters > 0 &&
+        first.coordinates.length > 10 &&
+        first.coordinates.every((c) => Number.isFinite(c[0]) && Number.isFinite(c[1])),
+      `duration=${Math.round(first.durationSeconds)}s coords=${first.coordinates.length}`,
+    )
+    check(
+      'routes sorted by travel time (alternatives after fastest)',
+      !second || first.durationSeconds <= second.durationSeconds,
+      `#0=${Math.round(first.durationSeconds)}s #1=${second ? Math.round(second.durationSeconds) + 's' : '—'}`,
+    )
+    check('route attribution present', /OSRM|OpenStreetMap/.test(r.json.attribution ?? ''))
+  }
+  r = await anon.get('/api/external/route?from=34.0522&to=34.1181,-118.3001')
+  check('route: malformed params rejected (400)', r.status === 400)
+  r = await anon.get('/api/external/route?from=34.0522,-118.2437&to=34.0522,-118.2437')
+  check('route: same origin/destination rejected (400)', r.status === 400)
+  r = await anon.get('/api/external/route?from=0.0,-160.0&to=5.0,-150.0')
+  check(
+    'route: unroutable ocean query → honest state, never invented',
+    r.status === 200 &&
+      (r.json.freshness === 'unavailable' ? r.json.data === null : r.json.freshness === 'live'),
     `freshness=${r.json?.freshness}`,
   )
   r = await anon.get('/api/activity?limit=20')

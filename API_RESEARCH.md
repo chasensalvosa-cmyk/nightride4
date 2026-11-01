@@ -62,6 +62,12 @@ keyless Esri World Dark Gray raster tiles when OpenFreeMap is unreachable. Map s
 server-proxied Nominatim with a 24 h cache and min-interval guard; charging stations use
 `overpass.osm.ch` with automatic fallback mirrors and a 10 min cache.
 
+**Location-biased search (2026-11):** when the rider has a GPS fix the map search sends `lat`/`lng`
+along with `q`; the proxy boxes the query to ±35 km around the rider (`viewbox` + `bounded=1`,
+falling back to `bounded=0` when the strict box finds nothing), computes great-circle distances
+per result and returns them sorted nearest-first. Verified live: `?q=coffee&lat=34.0522&lng=-118.2437`
+→ nearest match ≈ 1 km, all distances finite and ascending.
+
 ### 1.3 DeFlock / OpenStreetMap ALPR cameras (CHOSEN — keyless)
 
 | Field | Value |
@@ -92,6 +98,34 @@ date; no live video feed is ever accessed.
 > sightings** (the `police_activity` report category, auto-expiring after 2 h) — the same model
 > Waze and Exit51 use. The aviation layer shows all ADS-B aircraft equally (OpenSky), with no
 classification or targeting of law-enforcement flights.
+
+---
+
+### 1.4 OSRM routing (CHOSEN — keyless)
+
+| Field | Value |
+|---|---|
+| Provider | OSRM — Open Source Routing Machine, public demo server (car profile, OSM road data) |
+| Official docs | https://project-osrm.org/docs/v5.24.0/api/ , https://github.com/Project-OSRM/osrm-backend |
+| Authentication | None |
+| Credentials needed | None (`OSRM_BASE_URL` optionally repoints at a self-hosted instance) |
+| Endpoints used | `https://router.project-osrm.org/route/v1/driving/{lng},{lat};{lng},{lat}?overview=full&geometries=geojson&alternatives=2&steps=false` |
+| Data fields | routes[]: distance (m), duration (s), geometry.coordinates [lng,lat][]; waypoints |
+| Update frequency | Demo server follows OSM data ≈ weekly; routing graph refreshed periodically |
+| Coverage | Global road network (car profile) |
+| Pricing | Free demo service — **no SLA**; production use requires self-hosting (docker-osrm) |
+| Rate limits | No published hard limit; fair use only — the app caches each origin/destination pair for 10 min and quantizes the origin to ~110 m so a ticking GPS watcher does not spam it |
+| Commercial use | Allowed (ODbL attribution); demo server is explicitly not for production |
+| Redistribution | Routing © OpenStreetMap contributors, ODbL — OSRM |
+| Difficulty | 🟢 |
+| **Live test** | `route/v1/driving` LA downtown → Griffith Park `200 Ok` (767 ms, real geometry, alternatives present); mid-Pacific query returns `NoRoute` → surfaced as honest `unavailable`, never invented |
+
+**Chosen strategy:** choosing a destination (search result, clicked point → "Route here") plans the
+fastest route from the rider's live GPS position plus up to 2 alternatives, sorted by travel time.
+The fastest option is highlighted on the map (bright line + dark casing), alternatives render as
+dashed dim lines; the panel lets the rider switch between them. Reroute triggers on destination
+change or >~110 m origin movement. Failures (demo server down, `NoRoute`) surface as an honest
+"Routing unavailable" state — geometry is never invented.
 
 ---
 
@@ -209,7 +243,8 @@ classification or targeting of law-enforcement flights.
 | Police activity | Community reports (transient, 2 h auto-expiry) | Live — no live law-enforcement feed exists or is used (by design) |
 | Aviation awareness | OpenSky Network anonymous | Live (verified) |
 | Public safety announcements | NWS active alerts (synced to DB) | Live (verified) |
-| Map search / reverse geocode | Nominatim (server-proxied, cached) | Live (verified) |
+| Map search / reverse geocode | Nominatim (server-proxied, cached) — **location-biased since 2026-11** (±35 km box + distance sort when the rider has a GPS fix) | Live (verified) |
+| Fastest routes / navigation | OSRM public demo (car profile, `alternatives=2`), server-proxied + 10 min cache | Live (verified) — honest `unavailable` on `NoRoute`/outage, geometry never invented |
 | Database | Supabase Postgres (production) / Prisma SQLite (this deployment) | Supabase: migrations + RLS provided, awaiting project keys |
 
 ## 6. Integration standards applied to every provider

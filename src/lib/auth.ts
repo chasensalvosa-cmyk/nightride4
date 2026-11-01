@@ -16,6 +16,7 @@ const scrypt = promisify(_scrypt) as (
 
 export const SESSION_COOKIE = 'nightride_session'
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
+const RENEW_THRESHOLD_MS = 15 * 24 * 60 * 60 * 1000 // renew once < 15 d remain
 
 // ---------------------------------------------------------------- passwords
 
@@ -80,11 +81,55 @@ export async function getCurrentUser(): Promise<CurrentUser | null> {
   return session.user
 }
 
-export function sessionCookieOptions(maxAgeSeconds: number = SESSION_TTL_MS / 1000) {
+/** Raw session token from the request cookies (for renewal in /api/auth/me). */
+export async function readSessionToken(): Promise<string | null> {
+  const store = await cookies()
+  return store.get(SESSION_COOKIE)?.value ?? null
+}
+
+/** Sliding renewal: once less than 15 d remain, push the session out to a
+ *  fresh 30 d so active riders stay signed in instead of being logged out
+ *  “again and again”. Returns the new expiry (null = no change needed). */
+export async function renewSessionIfNeeded(token: string): Promise<Date | null> {
+  const session = await db.session.findUnique({ where: { token } })
+  if (!session) return null
+  const remaining = session.expiresAt.getTime() - Date.now()
+  if (remaining > RENEW_THRESHOLD_MS) return null
+  if (remaining <= 0) return null // expired — getCurrentUser already deletes it
+  const extended = new Date(Date.now() + SESSION_TTL_MS)
+  await db.session.update({ where: { id: session.id }, data: { expiresAt: extended } })
+  return extended
+}
+
+function isHttpsRequest(req: Request): boolean {
+  const proto = req.headers.get('x-forwarded-proto')?.split(',')[0]?.trim()
+  if (proto) return proto === 'https'
+  try {
+    return new URL(req.url).protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+export function sessionCookieOptions(
+  maxAgeSeconds: number = SESSION_TTL_MS / 1000,
+  req?: Request,
+): {
+  httpOnly: true
+  sameSite: 'lax' | 'none'
+  secure: boolean
+  path: string
+  maxAge: number
+} {
+  // Over HTTPS (preview embeds, production) the cookie must be
+  // SameSite=None; Secure — otherwise browsers drop it inside cross-site
+  // iframes and the rider gets signed out on every reload. Over plain HTTP
+  // (local dev) Lax applies, which is the safer default.
+  const secure = req ? isHttpsRequest(req) : process.env.NODE_ENV === 'production'
   return {
     httpOnly: true,
-    sameSite: 'lax' as const,
-    secure: process.env.NODE_ENV === 'production',
+    sameSite: secure ? 'none' : 'lax',
+    secure,
     path: '/',
     maxAge: maxAgeSeconds,
   }

@@ -50,6 +50,7 @@ export default function MapContainer({
   const containerRef = useRef<HTMLDivElement>(null)
   const mapRef = useRef<MLMap | null>(null)
   const userMarkerRef = useRef<Marker | null>(null)
+  const userLocationRef = useRef<{ lat: number; lng: number } | null>(null)
   const callbacksRef = useRef({ onMapClick, onMoveEnd, onMapError, onReady })
   callbacksRef.current = { onMapClick, onMoveEnd, onMapError, onReady }
 
@@ -89,6 +90,9 @@ export default function MapContainer({
       map.addControl(new ScaleControl({ maxWidth: 90, unit: 'metric' }), 'bottom-left')
 
       map.on('load', () => {
+        // A GPS fix that arrived while the engine was still booting is applied
+        // here — otherwise a stationary rider would never see their dot.
+        syncUserMarker(mapRef.current)
         callbacksRef.current.onReady?.(map as MLMap)
       })
 
@@ -137,10 +141,11 @@ export default function MapContainer({
   }, [])
 
   // User location dot — rendered ONLY when a real fix exists (permission first).
-  useEffect(() => {
-    const map = mapRef.current
+  // Red dot + soft halo; updated live by the watcher.
+  const syncUserMarker = (map: MLMap | null) => {
     if (!map) return
-    if (!userLocation) {
+    const loc = userLocationRef.current
+    if (!loc) {
       userMarkerRef.current?.remove()
       userMarkerRef.current = null
       return
@@ -148,14 +153,21 @@ export default function MapContainer({
     if (!userMarkerRef.current) {
       const el = document.createElement('div')
       el.className = 'flex flex-col items-center'
+      el.setAttribute('role', 'img')
+      el.setAttribute('aria-label', 'Your current location')
       el.innerHTML =
-        '<div class="nr-userdot-halo"></div><div class="nr-userdot" style="margin-top:-14px"></div>'
+        '<div class="nr-userdot-halo"></div><div class="nr-userdot" style="margin-top:-15px"></div>'
       userMarkerRef.current = new Marker({ element: el })
-        .setLngLat([userLocation.lng, userLocation.lat])
+        .setLngLat([loc.lng, loc.lat])
         .addTo(map)
     } else {
-      userMarkerRef.current.setLngLat([userLocation.lng, userLocation.lat])
+      userMarkerRef.current.setLngLat([loc.lng, loc.lat])
     }
+  }
+
+  useEffect(() => {
+    userLocationRef.current = userLocation
+    syncUserMarker(mapRef.current)
   }, [userLocation])
 
   const api: MapApi = {

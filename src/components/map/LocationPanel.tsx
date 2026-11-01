@@ -5,7 +5,7 @@
 // clicked point with reverse-geocoded address, plus contextual actions.
 
 import { useQuery } from '@tanstack/react-query'
-import { ExternalLink, Flag, Loader2, MapPin, ShieldCheck, X } from 'lucide-react'
+import { ExternalLink, Flag, Loader2, MapPin, Navigation, ShieldCheck, X } from 'lucide-react'
 import { formatCoordinate } from '@/lib/geo'
 import { api } from '@/lib/api-client'
 import { cn } from '@/lib/utils'
@@ -40,6 +40,7 @@ export function LocationPanel({
   onClose,
   onReportHere,
   onSaveHere,
+  onRouteHere,
   onConfirmReport,
   onFlagReport,
   canModerate,
@@ -48,6 +49,7 @@ export function LocationPanel({
   onClose: () => void
   onReportHere: (lat: number, lng: number, label?: string) => void
   onSaveHere: (lat: number, lng: number, label?: string) => void
+  onRouteHere?: (lat: number, lng: number, label?: string) => void
   onConfirmReport?: (reportId: string) => void
   onFlagReport?: (reportId: string) => void
   canModerate: boolean
@@ -84,6 +86,7 @@ export function LocationPanel({
             lng={selection.lng}
             onReportHere={onReportHere}
             onSaveHere={onSaveHere}
+            onRouteHere={onRouteHere}
           />
         )}
       </div>
@@ -264,11 +267,13 @@ function PointDetails({
   lng,
   onReportHere,
   onSaveHere,
+  onRouteHere,
 }: {
   lat: number
   lng: number
   onReportHere: (lat: number, lng: number, label?: string) => void
   onSaveHere: (lat: number, lng: number, label?: string) => void
+  onRouteHere?: (lat: number, lng: number, label?: string) => void
 }) {
   const { data, isFetching } = useQuery({
     queryKey: ['reverse', lat.toFixed(5), lng.toFixed(5)],
@@ -304,7 +309,25 @@ function PointDetails({
         <Row label="Longitude" value={formatCoordinate(lng, 'lng')} />
       </div>
       <div className="flex flex-wrap gap-2">
-        <Button size="sm" onClick={() => onReportHere(lat, lng, address ? `${address.label}${address.detail ? `, ${address.detail}` : ''}` : undefined)}>
+        {onRouteHere && (
+          <Button
+            size="sm"
+            onClick={() =>
+              onRouteHere(
+                lat,
+                lng,
+                address ? `${address.label}${address.detail ? `, ${address.detail}` : ''}` : undefined,
+              )
+            }
+          >
+            <Navigation className="mr-1.5 h-3.5 w-3.5" aria-hidden /> Route here
+          </Button>
+        )}
+        <Button
+          size="sm"
+          variant={onRouteHere ? 'secondary' : 'default'}
+          onClick={() => onReportHere(lat, lng, address ? `${address.label}${address.detail ? `, ${address.detail}` : ''}` : undefined)}
+        >
           Report here
         </Button>
         <Button size="sm" variant="secondary" onClick={() => onSaveHere(lat, lng, address?.label)}>

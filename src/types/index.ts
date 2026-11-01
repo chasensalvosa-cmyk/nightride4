@@ -179,6 +179,17 @@ export interface GeocodeResult {
   latitude: number
   longitude: number
   type: string
+  /** great-circle meters from the search origin (rider position); present
+   *  only when the search was biased to the user's location */
+  distanceMeters?: number | null
+}
+
+/** One route option returned by the routing service (OSRM).
+ *  `coordinates` are GeoJSON-ordered [lng, lat] pairs ready for MapLibre. */
+export interface RouteOption {
+  distanceMeters: number
+  durationSeconds: number
+  coordinates: [number, number][]
 }
 
 /** Data freshness, derived from real response timestamps — never guessed. */
