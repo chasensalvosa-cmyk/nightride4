@@ -1,0 +1,65 @@
+-- ============================================================================
+-- NIGHTRIDE — RLS verification script
+-- Run against a real Supabase/Postgres project AFTER applying
+-- supabase/migrations/001_init.sql. Execute as three different roles and
+-- check the expected results at each step (psql or Supabase SQL editor).
+--
+--   anon key  -> simulate "signed out"      (set local role anon; ...)
+--   auth uid A -> user A                    (set local request.jwt.claims ...)
+--   auth uid B -> user B
+--
+-- Expected matrix (the policies in 001_init.sql enforce exactly this):
+--   signed out  : SELECT profiles, community_reports, report_confirmations,
+--                 public_camera_locations, public_safety_events -> OK
+--                 SELECT rides, saved_locations, user_settings -> 0 rows
+--                 any INSERT/UPDATE/DELETE -> denied
+--   user A      : full CRUD on own rides/saved_locations/settings/reports/
+--                 comments; SELECT community_reports (not hidden) OK
+--   user B      : SELECT user A's ride -> 0 rows (rides are private)
+--                 UPDATE user A's report -> denied
+--   any user    : INSERT public_camera_locations -> denied (read-only)
+-- ============================================================================
+
+-- 0) sanity: RLS enabled everywhere?
+select tablename, rowsecurity from pg_tables
+where schemaname = 'public' and rowsecurity = false;
+-- expected: zero rows
+
+-- ---------------------------------------------------------------- as user A
+-- begin;
+--   select set_config('request.jwt.claims',
+--     json_build_object('sub','aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa','role','authenticated')::text,
+--     true);
+--
+--   -- can create own profile
+--   insert into profiles (id, username) values ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa','riderA');
+--   -- can create and read own ride; route_data stays private
+--   insert into rides (user_id, started_at) values ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', now());
+--   select count(*) from rides; -- 1
+--   -- can publish a community report
+--   insert into community_reports (user_id, title, description, category, latitude, longitude)
+--   values ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa','Pothole','Large pothole near off-ramp','road_hazard',47.61,-122.33);
+-- rollback;
+
+-- ---------------------------------------------------------------- as user B
+-- begin;
+--   select set_config('request.jwt.claims',
+--     json_build_object('sub','bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb','role','authenticated')::text,
+--     true);
+--
+--   select count(*) from rides;                        -- 0 (A's ride invisible)
+--   select count(*) from community_reports;            -- 1 (public, not hidden)
+--   update community_reports set title = 'hijacked'
+--     where user_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'; -- affects 0 rows
+--   insert into public_camera_locations (name, latitude, longitude, source_url)
+--   values ('fake', 0, 0, 'https://example.com');      -- DENIED (read-only)
+-- rollback;
+
+-- ---------------------------------------------------------------- as anon
+-- begin;
+--   set local role anon;
+--   select count(*) from community_reports;   -- 1 (public)
+--   select count(*) from rides;               -- 0
+--   insert into community_reports (user_id, title, description, category, latitude, longitude)
+--   values (gen_random_uuid(), 'spam', 'x', 'general_safety', 0, 0); -- DENIED
+-- rollback;

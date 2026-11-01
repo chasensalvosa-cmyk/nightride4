@@ -1,0 +1,12 @@
+{
+  "name": "nightride-realtime-service",
+  "version": "1.0.0",
+  "private": true,
+  "description": "NIGHTRIDE realtime service: community/safety event pushes and consent-gated rider presence.",
+  "scripts": {
+    "dev": "bun --hot index.ts"
+  },
+  "dependencies": {
+    "socket.io": "^4.8.4"
+  }
+}

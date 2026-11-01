@@ -1,0 +1,206 @@
+// NIGHTRIDE — Prisma schema (local SQLite persistence)
+// Mirrors the Supabase PostgreSQL DDL in supabase/migrations/001_init.sql.
+// Ownership rules are enforced in the API layer locally and by Row Level
+// Security policies in the Supabase deployment.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Profile {
+  id           String   @id
+  username     String   @unique
+  passwordHash String
+  avatarUrl    String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  sessions       Session[]
+  rides          Ride[]
+  savedLocations SavedLocation[]
+  reports        CommunityReport[]
+  comments       ReportComment[]
+  confirmations  ReportConfirmation[]
+  flags          AbuseFlag[]
+  settings       UserSettings?
+
+  @@map("profiles")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user Profile @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model Ride {
+  id              String    @id @default(cuid())
+  userId          String
+  title           String?
+  startedAt       DateTime
+  endedAt         DateTime?
+  durationSeconds Int       @default(0) // moving time accumulated client-side
+  distanceMeters  Float     @default(0)
+  averageSpeed    Float     @default(0) // m/s
+  maximumSpeed    Float     @default(0) // m/s
+  routeData       String    @default("[]") // JSON: [{lat,lng,t,spd}]
+  status          String    @default("active") // active | paused | completed
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  user Profile @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@index([userId, startedAt])
+  @@map("rides")
+}
+
+model SavedLocation {
+  id          String   @id @default(cuid())
+  userId      String
+  name        String
+  description String?
+  latitude    Float
+  longitude   Float
+  category    String   @default("custom") // charging | meeting_point | viewpoint | parking | custom
+  createdAt   DateTime @default(now())
+
+  user Profile @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("saved_locations")
+}
+
+model CommunityReport {
+  id                 String   @id @default(cuid())
+  userId             String
+  title              String
+  description        String
+  category           String // road_hazard | damaged_road | construction | road_closure | charging_station | riding_location | general_safety
+  latitude           Float
+  longitude          Float
+  locationLabel      String?
+  status             String   @default("open") // open | resolved | closed
+  verificationStatus String   @default("unverified") // unverified | confirmed
+  hidden             Boolean  @default(false) // moderation: auto-hidden after abuse threshold
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  user           Profile              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  comments       ReportComment[]
+  confirmations  ReportConfirmation[]
+
+  @@index([category, status, createdAt])
+  @@index([latitude, longitude])
+  @@map("community_reports")
+}
+
+model ReportComment {
+  id        String   @id @default(cuid())
+  reportId  String
+  userId    String
+  content   String
+  hidden    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  report CommunityReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  user   Profile         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([reportId, createdAt])
+  @@map("report_comments")
+}
+
+model ReportConfirmation {
+  id        String   @id @default(cuid())
+  reportId  String
+  userId    String
+  createdAt DateTime @default(now())
+
+  report CommunityReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  user   Profile         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([reportId, userId])
+  @@map("report_confirmations")
+}
+
+model AbuseFlag {
+  id        String   @id @default(cuid())
+  itemType  String // report | comment
+  itemId    String
+  userId    String
+  reason    String
+  createdAt DateTime @default(now())
+
+  user Profile @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([itemType, itemId, userId])
+  @@index([itemType, itemId])
+  @@map("abuse_flags")
+}
+
+// Verified public traffic camera inventory (documented public sources only).
+// Ships EMPTY: populated only from a configured official provider or a
+// reviewed import with source_url + last_verified_at. No invented points.
+model PublicCameraLocation {
+  id              String   @id @default(cuid())
+  name            String
+  latitude        Float
+  longitude       Float
+  cameraType      String   @default("traffic")
+  sourceUrl       String
+  lastVerifiedAt  DateTime @default(now())
+
+  @@map("public_camera_locations")
+}
+
+// Official public safety events (e.g. NWS active alerts synced server-side).
+model PublicSafetyEvent {
+  id          String   @id @default(cuid())
+  externalId  String   @unique
+  title       String
+  description String
+  category    String // e.g. Weather Alert, Flood Warning, Road Closure (official)
+  severity    String?
+  latitude    Float?
+  longitude   Float?
+  areaDesc    String?
+  sourceUrl   String
+  sourceName  String   @default("NWS")
+  occurredAt  DateTime
+  updatedAt   DateTime @updatedAt
+
+  @@index([occurredAt])
+  @@map("public_safety_events")
+}
+
+model UserSettings {
+  userId  String @id
+  // privacy
+  shareRidePresence Boolean @default(false)
+  publicProfile     Boolean @default(true)
+  // notifications
+  notifyNearbyReports   Boolean @default(true)
+  notifySafetyAlerts    Boolean @default(true)
+  notifyReportReplies   Boolean @default(true)
+  notifyRideSummaries   Boolean @default(true)
+  // map
+  defaultMapStyle    String  @default("auto") // auto | mapbox | osm
+  showLayerLabels    Boolean @default(true)
+  keepMapCenterState Boolean @default(true)
+
+  user Profile @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_settings")
+}
