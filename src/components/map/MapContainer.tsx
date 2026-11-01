@@ -1,14 +1,15 @@
 'use client'
 
 // NIGHTRIDE — core MapLibre container.
-// Dark basemap (Mapbox dark-v11 when a token exists, keyless CARTO dark
-// otherwise), permission-gated user location dot, click handling and a
-// stable imperative API published through MapContext.
+// Dark basemap resolved live at boot (Mapbox dark-v11 when a token exists,
+// keyless OpenFreeMap dark vector otherwise, keyless Esri World Dark Gray as
+// emergency fallback), permission-gated user location dot, click handling and
+// a stable imperative API published through MapContext.
 
 import { useEffect, useRef } from 'react'
 import { Map as MLMap, Marker, ScaleControl, setWorkerUrl } from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
-import { buildMapStyle, activeBasemap } from '@/services/map/mapStyle'
+import { resolveMapStyle } from '@/services/map/mapStyle'
 import { MapContext, type MapApi } from './map-context'
 import { DEFAULT_VIEW, useMapStore } from '@/stores/map-store'
 import type { MapViewState } from '@/types'
@@ -58,64 +59,79 @@ export default function MapContainer({
   )
 
   useEffect(() => {
-    if (!containerRef.current || mapRef.current) return
+    if (!containerRef.current) return
 
-    const map = new MLMap({
-      container: containerRef.current,
-      style: buildMapStyle(),
-      center: [initialView.current.lng, initialView.current.lat],
-      zoom: initialView.current.zoom,
-      minZoom: 3,
-      maxZoom: 18,
-      attributionControl: { compact: true },
-      canvasContextAttributes: { antialias: true },
-    })
-    mapRef.current = map
+    let disposed = false
+    let map: MLMap | null = null
+    let observer: ResizeObserver | null = null
 
-    map.addControl(new ScaleControl({ maxWidth: 90, unit: 'metric' }), 'bottom-left')
+    // Resolve the basemap first (Mapbox token → keyless OpenFreeMap probe →
+    // keyless Esri raster), then boot the engine with whatever is actually
+    // reachable. The resolved provider is published to the store so the UI
+    // label and accessibility text always reflect reality.
+    void (async () => {
+      const { style, info } = await resolveMapStyle()
+      if (disposed || !containerRef.current) return
+      useMapStore.getState().setBasemap(info)
 
-    map.on('load', () => {
-      callbacksRef.current.onReady?.(map)
-    })
+      map = new MLMap({
+        container: containerRef.current,
+        style,
+        center: [initialView.current.lng, initialView.current.lat],
+        zoom: initialView.current.zoom,
+        minZoom: 3,
+        maxZoom: 18,
+        attributionControl: { compact: true },
+        canvasContextAttributes: { antialias: true },
+      })
+      mapRef.current = map
 
-    map.on('moveend', () => {
-      const c = map.getCenter()
-      const b = map.getBounds()
-      const view: MapViewState = {
-        lat: c.lat,
-        lng: c.lng,
-        zoom: map.getZoom(),
-      }
-      const bounds: MapBounds = {
-        minLat: b.getSouth(),
-        minLng: b.getWest(),
-        maxLat: b.getNorth(),
-        maxLng: b.getEast(),
-      }
-      useMapStore.getState().setView(view)
-      callbacksRef.current.onMoveEnd?.(view, bounds)
-    })
+      map.addControl(new ScaleControl({ maxWidth: 90, unit: 'metric' }), 'bottom-left')
 
-    map.on('error', (e) => {
-      // Tile/network errors are surfaced but do not destroy the map.
-      const msg = e?.error?.message ?? 'Map error'
-      if (!msg.toLowerCase().includes('aborted')) {
-        callbacksRef.current.onMapError?.(msg)
-      }
-    })
+      map.on('load', () => {
+        callbacksRef.current.onReady?.(map as MLMap)
+      })
 
-    map.on('click', (e) => {
-      callbacksRef.current.onMapClick?.(e.lngLat.lat, e.lngLat.lng)
-    })
+      map.on('moveend', () => {
+        const c = map!.getCenter()
+        const b = map!.getBounds()
+        const view: MapViewState = {
+          lat: c.lat,
+          lng: c.lng,
+          zoom: map!.getZoom(),
+        }
+        const bounds: MapBounds = {
+          minLat: b.getSouth(),
+          minLng: b.getWest(),
+          maxLat: b.getNorth(),
+          maxLng: b.getEast(),
+        }
+        useMapStore.getState().setView(view)
+        callbacksRef.current.onMoveEnd?.(view, bounds)
+      })
 
-    const observer = new ResizeObserver(() => {
-      map.resize()
-    })
-    observer.observe(containerRef.current)
+      map.on('error', (e) => {
+        // Tile/network errors are surfaced but do not destroy the map.
+        const msg = e?.error?.message ?? 'Map error'
+        if (!msg.toLowerCase().includes('aborted')) {
+          callbacksRef.current.onMapError?.(msg)
+        }
+      })
+
+      map.on('click', (e) => {
+        callbacksRef.current.onMapClick?.(e.lngLat.lat, e.lngLat.lng)
+      })
+
+      observer = new ResizeObserver(() => {
+        map?.resize()
+      })
+      observer.observe(containerRef.current)
+    })()
 
     return () => {
-      observer.disconnect()
-      map.remove()
+      disposed = true
+      observer?.disconnect()
+      map?.remove()
       mapRef.current = null
     }
   }, [])
@@ -168,6 +184,9 @@ export default function MapContainer({
     },
   }
 
+  // Reflects the basemap actually resolved at boot (probe-driven).
+  const basemapLabel = useMapStore((s) => s.basemap.label)
+
   return (
     <MapContext.Provider value={api}>
       <div className="relative h-full w-full">
@@ -178,7 +197,7 @@ export default function MapContainer({
           ref={containerRef}
           className="h-full w-full"
           role="application"
-          aria-label={`NIGHTRIDE live map — ${activeBasemap().label} basemap`}
+          aria-label={`NIGHTRIDE live map — ${basemapLabel} basemap`}
         />
         {/* overlays: pointer events opt-in per element */}
         <div className="pointer-events-none absolute inset-0">{children}</div>

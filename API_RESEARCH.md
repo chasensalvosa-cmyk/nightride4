@@ -30,28 +30,37 @@ Legend for integration difficulty: 🟢 low (no key, REST/JSON) · 🟡 medium (
 | **Live test** | `401` without token (expected) — integration coded and active the moment a token is supplied |
 | Notes | Public `pk.` tokens are **not secrets** (safe in `NEXT_PUBLIC_*`), but must never grant secret scopes. |
 
-### 1.2 OpenStreetMap (CARTO dark basemap + Nominatim + Overpass)
+### 1.2 OpenStreetMap basemaps + Nominatim + Overpass
 
 | Field | Value |
 |---|---|
-| Provider | OpenStreetMap data — CARTO basemap tiles, Nominatim geocoding, Overpass POI extraction |
-| Official docs | https://wiki.openstreetmap.org/wiki/Raster_tile_providers (CARTO), https://nominatim.org/release-docs/latest/api/ , https://wiki.openstreetmap.org/wiki/Overpass_API |
+| Provider | OpenStreetMap data — OpenFreeMap dark vector basemap (primary keyless), Esri World Dark Gray raster (keyless fallback), Nominatim geocoding, Overpass POI extraction |
+| Official docs | https://openfreemap.org/docs/ , https://github.com/openmaptiles , https://server.arcgisonline.com/arcgis/rest/services/Canvas/World_Dark_Gray_Base/MapServer , https://wiki.openstreetmap.org/wiki/Raster_tile_providers , https://nominatim.org/release-docs/latest/api/ , https://wiki.openstreetmap.org/wiki/Overpass_API |
 | Authentication | None (usage policy compliance instead) |
 | Credentials needed | None |
-| Endpoints used | `https://{a-d}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png` (dark basemap), `https://nominatim.openstreetmap.org/search|reverse?…` , `https://overpass.osm.ch/api/interpreter?data=[out:json];node[amenity=charging_station](around:…);out;` |
+| Endpoints used | `https://tiles.openfreemap.org/styles/dark` (vector style + `…/planet` tiles), `https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_{Base,Reference}/MapServer/tile/{z}/{y}/{x}` (raster fallback), `https://nominatim.openstreetmap.org/search|reverse?…` , `https://overpass.osm.ch/api/interpreter?data=[out:json];node[amenity=charging_station](around:…);out;` |
 | Data fields | Nominatim: lat/lon, display_name, type, class. Overpass: id, lat, lon, tags (operator, capacity, socket types) |
-| Update frequency | Nominatim ≈ real-time OSM replication; Overpass mirrors ≈ minutes behind OSM |
+| Update frequency | OpenFreeMap ≈ weekly OSM planet refresh; Nominatim ≈ real-time OSM replication; Overpass mirrors ≈ minutes behind OSM |
 | Coverage | Global |
-| Pricing | Free |
-| Rate limits | Nominatim: max 1 req/s, custom User-Agent mandatory. Overpass: 2 concurrent slots, be gentle; mirror `overpass.osm.ch` verified reachable from this sandbox (`overpass-api.de` is blocked at network level here) |
+| Pricing | Free (OpenFreeMap free incl. commercial use; Esri public canvas tiles free with attribution) |
+| Rate limits | OpenFreeMap: no hard limit, fair use. Nominatim: max 1 req/s, custom User-Agent mandatory. Overpass: 2 concurrent slots, be gentle; mirror `overpass.osm.ch` verified reachable from this sandbox (`overpass-api.de` is blocked at network level here) |
 | Commercial use | Allowed with ODbL attribution; heavy commercial use of public Nominatim is not allowed (self-host recommended) |
-| Redistribution | ODbL 1.0 — attribution "© OpenStreetMap contributors" mandatory; CARTO tiles additionally "© CARTO" |
+| Redistribution | ODbL 1.0 — attribution "© OpenStreetMap contributors" mandatory; Esri tiles additionally "Tiles © Esri" |
 | Difficulty | 🟢 |
-| **Live test** | dark tile `200 OK` (24 ms) · OSM tile `200 OK` · Nominatim search `200 OK` (608 ms, real result) · `overpass.osm.ch` `200 OK` (778 ms) · `overpass-api.de`, `overpass.kumi.systems`, `overpass.private.coffee` **blocked** in this sandbox |
+| **Live test** | OpenFreeMap `styles/dark` `200 OK` (valid MapLibre style, background `rgb(12,12,12)`) · Esri Dark_Gray_Base tile `200 OK` (`image/jpeg`) + Reference tile `200 OK` (`image/png`) · Nominatim search `200 OK` (608 ms, real result) · `overpass.osm.ch` `200 OK` (778 ms) · `overpass-api.de`, `overpass.kumi.systems`, `overpass.private.coffee` **blocked** in this sandbox |
 
-**Chosen strategy:** MapLibre GL renders either Mapbox dark-v11 (when token present) or CARTO
-dark_all (keyless). Map search uses server-proxied Nominatim with a 24 h cache and min-interval
-guard; charging stations use `overpass.osm.ch` with automatic fallback mirrors and a 10 min cache.
+> **⚠ CARTO basemap tiles removed (2026-10):** `basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png`
+> now serves watermarked **"API KEY REQUIRED"** images (HTTP 200!) unless a CARTO API key is
+> supplied — a plain HTTP ping therefore *falsely* passes. Keyless CARTO tiles were replaced by
+> OpenFreeMap dark (vector, probed + parsed live before the map boots) with Esri World Dark Gray
+> raster as the guaranteed keyless last resort. A CARTO key can be reintroduced as an optional
+> provider later if desired; Mapbox remains the optional premium path (`NEXT_PUBLIC_MAPBOX_TOKEN`).
+
+**Chosen strategy:** MapLibre GL renders Mapbox dark-v11 when a token is present; otherwise the
+keyless OpenFreeMap dark vector style (fetched + validated client-side at boot), falling back to
+keyless Esri World Dark Gray raster tiles when OpenFreeMap is unreachable. Map search uses
+server-proxied Nominatim with a 24 h cache and min-interval guard; charging stations use
+`overpass.osm.ch` with automatic fallback mirrors and a 10 min cache.
 
 ---
 
@@ -159,7 +168,7 @@ guard; charging stations use `overpass.osm.ch` with automatic fallback mirrors a
 
 | Layer | Provider | Mode in this deployment |
 |---|---|---|
-| Basemap | Mapbox dark-v11 **or** CARTO dark_all (OSM) | Mapbox: ready, awaiting token → falls back to OSM (live now) |
+| Basemap | Mapbox dark-v11 → OpenFreeMap dark (keyless vector) → Esri World Dark Gray (keyless raster) | OpenFreeMap live now (probed each boot); Mapbox ready, awaiting token |
 | Rider locations | Socket.IO presence, explicit consent | Live (empty unless riders consent — by design) |
 | Traffic cameras | WSDOT-style provider module | **Not configured** (explicit state) — table ready for verified inventories |
 | Road hazards | Community reports (DB) | Live |

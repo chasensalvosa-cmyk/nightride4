@@ -33,7 +33,6 @@ import { fetchChargingStations } from '@/services/map/chargingService'
 import { fetchAviation } from '@/services/aviation/aviationService'
 import { fetchCameras } from '@/services/cameras/cameraService'
 import { fetchApiStatus } from '@/services/publicSafety/apiStatusService'
-import { activeBasemap } from '@/services/map/mapStyle'
 import type { CommunityReport, ReportCategory } from '@/types'
 
 const HAZARD_CATEGORIES: ReportCategory[] = ['road_hazard', 'damaged_road', 'construction', 'general_safety']
@@ -58,6 +57,7 @@ export default function MapView() {
   const layers = useMapStore((s) => s.layers)
   const setLayer = useMapStore((s) => s.setLayer)
   const view = useMapStore((s) => s.view)
+  const basemapLabel = useMapStore((s) => s.basemap.label)
 
   const [mapInstance, setMapInstance] = useState<MLMap | null>(null)
   const [bounds, setBounds] = useState<MapBounds | null>(null)
@@ -471,7 +471,7 @@ export default function MapView() {
                 Live
               </span>
               <span className="ml-auto hidden text-[10px] text-text-muted md:inline">
-                {activeBasemap().label}
+                {basemapLabel}
               </span>
             </div>
             {mapError && (

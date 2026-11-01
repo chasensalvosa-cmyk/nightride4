@@ -8,6 +8,7 @@ import { fetchChargingStations } from '@/lib/external/overpass'
 import { fetchActiveAlerts } from '@/lib/external/nws'
 import { isCameraProviderConfigured, fetchProviderCameras } from '@/lib/external/cameras'
 import { pingRealtimeService } from '@/lib/realtime'
+import { OPENFREEMAP_DARK_STYLE_URL } from '@/services/map/mapStyle'
 import type { ApiStatusEntry, ApiStatusResponse } from '@/types'
 
 const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN?.trim() || ''
@@ -73,7 +74,7 @@ export async function GET() {
             status: 'missing',
             detail:
               'No NEXT_PUBLIC_MAPBOX_TOKEN set — Mapbox dark-v11 tiles disabled. ' +
-              'Keyless OpenStreetMap dark basemap is active as fallback.',
+              'Keyless OpenFreeMap dark basemap is active as fallback.',
           }
         }
         const ok = await pingUrl(
@@ -87,15 +88,47 @@ export async function GET() {
     ),
     check(
       'osm',
-      'OpenStreetMap / CARTO',
-      'Basemap fallback (OSM dark tiles)',
+      'OpenFreeMap / Esri (keyless)',
+      'Basemap fallback (dark, keyless)',
       async () => {
-        const ok = await pingUrl('https://a.basemaps.cartocdn.com/dark_all/3/2/3.png')
-        return ok
-          ? { status: 'connected', detail: 'Dark basemap tiles reachable (keyless).' }
-          : { status: 'unreachable', detail: 'Tile server unreachable.' }
+        // CARTO dark tiles were dropped: they now answer HTTP 200 with a
+        // watermarked "API KEY REQUIRED" image, so a plain ping is NOT proof
+        // of a working basemap. OpenFreeMap is validated by parsing the style
+        // document itself; Esri by an image content-type check.
+        try {
+          const res = await fetch(OPENFREEMAP_DARK_STYLE_URL, {
+            signal: AbortSignal.timeout(6000),
+          })
+          if (res.ok) {
+            const style = (await res.json()) as {
+              sources?: unknown
+              layers?: unknown[]
+            }
+            if (style?.sources && Array.isArray(style.layers) && style.layers.length > 0) {
+              return {
+                status: 'connected',
+                detail:
+                  'OpenFreeMap dark vector style verified (parsed live) — keyless dark basemap active.',
+              }
+            }
+          }
+        } catch {
+          // fall through to the Esri raster check
+        }
+        const esri = await fetch(
+          'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/3/2/1',
+          { signal: AbortSignal.timeout(6000) },
+        ).catch(() => null)
+        if (esri?.ok && (esri.headers.get('content-type') ?? '').startsWith('image/')) {
+          return {
+            status: 'connected',
+            detail:
+              'OpenFreeMap unreachable — Esri World Dark Gray raster fallback verified (keyless).',
+          }
+        }
+        return { status: 'unreachable', detail: 'No keyless dark basemap reachable.' }
       },
-      { attribution: '© OpenStreetMap contributors © CARTO' },
+      { attribution: '© OpenStreetMap contributors · OpenFreeMap · Tiles © Esri' },
     ),
     check(
       'aviation',
