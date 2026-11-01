@@ -21,6 +21,7 @@ import { fetchRides } from '@/services/rides/rideService'
 import { fetchSavedLocations } from '@/services/locations/savedLocationService'
 import { fetchPublicSafety } from '@/services/publicSafety/publicSafetyService'
 import { fetchApiStatus } from '@/services/publicSafety/apiStatusService'
+import { APP_BUILD } from '@/lib/build'
 import { useAuth } from '@/hooks/use-auth'
 import { useRealtime } from '@/hooks/use-realtime'
 import { useRealtimeStore } from '@/stores/realtime-store'
@@ -180,6 +181,9 @@ export default function DashboardPage() {
           fetchedAt={safetyQuery.data?.fetchedAt ?? null}
           note={safetyQuery.data?.note}
         />
+        <p className="pt-1 text-center text-[10px] uppercase tracking-wider text-text-muted" data-build={APP_BUILD}>
+          NIGHTRIDE · build {APP_BUILD}
+        </p>
         <div className="md:col-span-2 lg:col-span-3">
           <SavedLocationsCard
             locations={savedQuery.data?.locations ?? []}
