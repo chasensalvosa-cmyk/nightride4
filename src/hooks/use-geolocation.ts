@@ -3,8 +3,17 @@
 // NIGHTRIDE — geolocation hook.
 // Honest permission handling: granted / denied / unavailable / timeout,
 // with explicit user opt-in (no silent background watching).
+//
+// Calibration: Wi-Fi/network fixes (desktop browsers especially) can be
+// STABLE-BUT-WRONG — the geolocation database pins the rider's network to the
+// wrong neighborhood and no GPS option changes that. The rider can calibrate
+// once ("tap where you actually are"); the stored offset is then applied to
+// every fix that still looks like the original wrong one. Real GPS fixes
+// (good accuracy) and positions far from the anchor pass through untouched,
+// so the correction never follows the rider onto the road.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { haversineMeters } from '@/lib/geo'
 
 export type GeoPermission = 'unknown' | 'prompt' | 'granted' | 'denied' | 'unavailable' | 'error'
 
@@ -15,6 +24,23 @@ export interface GeoCoords {
   heading: number | null
   speed: number | null
   timestamp: number
+  /** set when the stored calibration shifted this fix */
+  calibrated?: boolean
+  /** device-reported position before the calibration was applied */
+  rawLat?: number
+  rawLng?: number
+}
+
+/** Manual position correction, persisted per-browser (localStorage) and
+ *  shared by every hook instance (map, ride tracker, settings). */
+export interface GeoCalibration {
+  /** the device-reported fix this correction was measured against */
+  anchorLat: number
+  anchorLng: number
+  /** correction added to matching fixes (degrees) */
+  offsetLat: number
+  offsetLng: number
+  setAt: number
 }
 
 export interface GeolocationState {
@@ -22,12 +48,78 @@ export interface GeolocationState {
   coords: GeoCoords | null
   error: string | null
   watching: boolean
+  /** the stored calibration, when one is active on this browser */
+  calibration: GeoCalibration | null
 }
 
 interface Options {
   /** automatically start watching when permission was previously granted */
   auto?: boolean
   enableHighAccuracy?: boolean
+}
+
+const CALIBRATION_KEY = 'nightride:geo-calibration'
+const CALIBRATION_EVENT = 'nightride:geo-calibration-changed'
+/** A wrong Wi-Fi fix repeats at nearly the same coordinates every time; a fix
+ *  further from the anchor than this is a different source (real GPS, or the
+ *  rider moved) and must NOT be shifted. */
+const CALIBRATION_ANCHOR_RADIUS_M = 2000
+/** Fixes at least this accurate are trusted GPS — calibration is bypassed so
+ *  a phone's real GPS fix is never offset by a desktop-era correction. */
+const CALIBRATION_BYPASS_ACCURACY_M = 50
+/** Wi-Fi geolocation databases get corrected over time; drop stale records. */
+const CALIBRATION_TTL_MS = 30 * 24 * 60 * 60 * 1000
+
+function loadCalibration(): GeoCalibration | null {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = window.localStorage.getItem(CALIBRATION_KEY)
+    if (!raw) return null
+    const c = JSON.parse(raw) as Partial<GeoCalibration>
+    const setAt = c.setAt
+    if (
+      !Number.isFinite(c.anchorLat) ||
+      !Number.isFinite(c.anchorLng) ||
+      !Number.isFinite(c.offsetLat) ||
+      !Number.isFinite(c.offsetLng) ||
+      typeof setAt !== 'number' ||
+      Date.now() - setAt > CALIBRATION_TTL_MS
+    ) {
+      window.localStorage.removeItem(CALIBRATION_KEY)
+      return null
+    }
+    return c as GeoCalibration
+  } catch {
+    return null
+  }
+}
+
+function storeCalibration(c: GeoCalibration | null) {
+  if (typeof window === 'undefined') return
+  try {
+    if (c) window.localStorage.setItem(CALIBRATION_KEY, JSON.stringify(c))
+    else window.localStorage.removeItem(CALIBRATION_KEY)
+  } catch {
+    /* storage unavailable (private mode) — calibration just won't persist */
+  }
+  window.dispatchEvent(new CustomEvent(CALIBRATION_EVENT))
+}
+
+/** Shift a raw fix by the stored calibration when it matches the anchor
+ *  (same low-accuracy Wi-Fi/network spot). Everything else passes through. */
+function applyCalibration(raw: GeoCoords, cal: GeoCalibration | null): GeoCoords {
+  if (!cal) return raw
+  const fromAnchorM = haversineMeters(raw.lat, raw.lng, cal.anchorLat, cal.anchorLng)
+  const wifiClassFix = raw.accuracy > CALIBRATION_BYPASS_ACCURACY_M
+  if (fromAnchorM > CALIBRATION_ANCHOR_RADIUS_M || !wifiClassFix) return raw
+  return {
+    ...raw,
+    lat: raw.lat + cal.offsetLat,
+    lng: raw.lng + cal.offsetLng,
+    calibrated: true,
+    rawLat: raw.lat,
+    rawLng: raw.lng,
+  }
 }
 
 export function useGeolocation(options: Options = {}) {
@@ -37,9 +129,30 @@ export function useGeolocation(options: Options = {}) {
     coords: null,
     error: null,
     watching: false,
+    calibration: null,
   })
   const watchIdRef = useRef<number | null>(null)
+  /** latest RAW device fix — the calibration is applied on top of it */
   const lastPosRef = useRef<GeoCoords | null>(null)
+  const calibrationRef = useRef<GeoCalibration | null>(null)
+
+  // Load the stored calibration once per mount and keep every hook instance
+  // in sync (map dot, ride tracker and settings share the same record).
+  useEffect(() => {
+    calibrationRef.current = loadCalibration()
+    setState((s) => ({ ...s, calibration: calibrationRef.current }))
+    const sync = () => {
+      calibrationRef.current = loadCalibration()
+      const raw = lastPosRef.current
+      setState((s) => ({
+        ...s,
+        calibration: calibrationRef.current,
+        coords: raw ? applyCalibration(raw, calibrationRef.current) : s.coords,
+      }))
+    }
+    window.addEventListener(CALIBRATION_EVENT, sync)
+    return () => window.removeEventListener(CALIBRATION_EVENT, sync)
+  }, [])
 
   const stop = useCallback(() => {
     if (watchIdRef.current !== null) {
@@ -72,8 +185,8 @@ export function useGeolocation(options: Options = {}) {
     }))
   }, [])
 
-  const handlePosition = useCallback((pos: GeolocationPosition) => {
-    const coords: GeoCoords = {
+  const handlePosition = useCallback((pos: GeolocationPosition): GeoCoords => {
+    const raw: GeoCoords = {
       lat: pos.coords.latitude,
       lng: pos.coords.longitude,
       accuracy: pos.coords.accuracy,
@@ -81,14 +194,16 @@ export function useGeolocation(options: Options = {}) {
       speed: pos.coords.speed,
       timestamp: pos.timestamp,
     }
-    lastPosRef.current = coords
+    lastPosRef.current = raw
+    const effective = applyCalibration(raw, calibrationRef.current)
     setState((s) => ({
       ...s,
       permission: 'granted',
-      coords,
+      coords: effective,
       error: null,
       watching: true,
     }))
+    return effective
   }, [])
 
   const start = useCallback(() => {
@@ -112,7 +227,8 @@ export function useGeolocation(options: Options = {}) {
     )
   }, [enableHighAccuracy, handlePosition, handleError])
 
-  /** One-shot position read (for permission prompts / recentering). */
+  /** One-shot position read (for permission prompts / recentering).
+   *  Resolves with the effective (calibration-corrected) coordinates. */
   const requestOnce = useCallback((): Promise<GeoCoords | null> => {
     return new Promise((resolve) => {
       if (typeof navigator === 'undefined' || !navigator.geolocation) {
@@ -126,8 +242,7 @@ export function useGeolocation(options: Options = {}) {
       }
       navigator.geolocation.getCurrentPosition(
         (pos) => {
-          handlePosition(pos)
-          resolve(lastPosRef.current)
+          resolve(handlePosition(pos))
         },
         (err) => {
           handleError(err)
@@ -137,6 +252,34 @@ export function useGeolocation(options: Options = {}) {
       )
     })
   }, [enableHighAccuracy, handlePosition, handleError])
+
+  /** Record a manual correction: the rider tapped `lat/lng` as their true
+   *  position while the device reported the latest raw fix. The offset is
+   *  stored and applied to future matching fixes. Returns the created
+   *  calibration, or null when no raw fix was available to measure against. */
+  const calibrateTo = useCallback((lat: number, lng: number): GeoCalibration | null => {
+    const raw = lastPosRef.current
+    if (!raw) return null
+    const cal: GeoCalibration = {
+      anchorLat: raw.lat,
+      anchorLng: raw.lng,
+      offsetLat: lat - raw.lat,
+      offsetLng: lng - raw.lng,
+      setAt: Date.now(),
+    }
+    calibrationRef.current = cal
+    storeCalibration(cal)
+    setState((s) => ({ ...s, calibration: cal, coords: applyCalibration(raw, cal) }))
+    return cal
+  }, [])
+
+  /** Drop the stored correction — the device's raw fixes are used again. */
+  const clearCalibration = useCallback(() => {
+    calibrationRef.current = null
+    storeCalibration(null)
+    const raw = lastPosRef.current
+    setState((s) => ({ ...s, calibration: null, coords: raw ?? s.coords }))
+  }, [])
 
   useEffect(() => {
     if (!auto) return
@@ -151,5 +294,5 @@ export function useGeolocation(options: Options = {}) {
     }
   }, [auto, start])
 
-  return { ...state, start, stop, requestOnce }
+  return { ...state, start, stop, requestOnce, calibrateTo, clearCalibration }
 }

@@ -36,8 +36,9 @@ export interface MapContainerProps {
   onReady?: (map: MLMap) => void
   /** show the permission-gated user location dot (accuracy in meters
    *  renders the true-scale uncertainty circle — a Wi-Fi fix honestly shows
-   *  a large circle, GPS a tight one) */
-  userLocation: { lat: number; lng: number; accuracy?: number } | null
+   *  a large circle, GPS a tight one; `calibrated` marks a rider-asserted
+   *  position which draws no uncertainty circle at all) */
+  userLocation: { lat: number; lng: number; accuracy?: number; calibrated?: boolean } | null
   children?: React.ReactNode
 }
 
@@ -52,7 +53,9 @@ export default function MapContainer({
   const containerRef = useRef<HTMLDivElement>(null)
   const mapRef = useRef<MLMap | null>(null)
   const userMarkerRef = useRef<Marker | null>(null)
-  const userLocationRef = useRef<{ lat: number; lng: number; accuracy?: number } | null>(null)
+  const userLocationRef = useRef<
+    { lat: number; lng: number; accuracy?: number; calibrated?: boolean } | null
+  >(null)
   const callbacksRef = useRef({ onMapClick, onMoveEnd, onMapError, onReady })
   callbacksRef.current = { onMapClick, onMoveEnd, onMapError, onReady }
 
@@ -170,9 +173,14 @@ export default function MapContainer({
     }
 
     // Accuracy circle beneath the dot (honest uncertainty: a Wi-Fi/network
-    // fix shows a wide circle, a GPS fix a tight one). Source/layer ops
-    // throw before the style finishes loading — the 'load' handler re-applies
-    // whatever fix is current, so skipping here is safe.
+    // fix shows a wide circle, a GPS fix a tight one). A calibrated position
+    // is rider-asserted, not probabilistic — the circle is hidden instead of
+    // claiming false precision. Source/layer ops throw before the style
+    // finishes loading — the 'load' handler re-applies whatever fix is
+    // current, so skipping here is safe.
+    const calibrated = loc.calibrated === true
+    const wantCircle =
+      !calibrated && typeof loc.accuracy === 'number' && loc.accuracy > 0
     const circleFeature = {
       type: 'Feature' as const,
       geometry: { type: 'Point' as const, coordinates: [loc.lng, loc.lat] },
@@ -182,43 +190,51 @@ export default function MapContainer({
       },
     }
     try {
-      if (typeof loc.accuracy === 'number' && loc.accuracy > 0 && map.isStyleLoaded()) {
-        // Source first (data refreshes on every fix), then the layer if it is
-        // not up yet — checking the LAYER (not the source) as the init test
-        // makes this recover from a partial add instead of getting stuck.
-        if (!map.getSource(ACCURACY_LAYER)) {
-          map.addSource(ACCURACY_LAYER, {
-            type: 'geojson',
-            data: { type: 'FeatureCollection', features: [circleFeature] },
-          })
-        } else {
-          ;(map.getSource(ACCURACY_LAYER) as GeoJSONSource).setData(circleFeature)
-        }
-        if (!map.getLayer(ACCURACY_LAYER)) {
-          map.addLayer({
-            id: ACCURACY_LAYER,
-            type: 'circle',
-            source: ACCURACY_LAYER,
-            paint: {
-              'circle-color': '#FF3B30',
-              'circle-opacity': 0.08,
-              'circle-stroke-color': 'rgba(255, 59, 48, 0.35)',
-              'circle-stroke-width': 1,
-              'circle-pitch-alignment': 'map',
-              // True-scale radius: r(zoom) = accuracy · 2^zoom / (78271.484 ·
-              // cos(lat)). MapLibre only allows `zoom` inside interpolate/step,
-              // and interpolate CLAMPS outside its stop range — so the stops
-              // must span the whole zoom range (0…22). An exponential-base-2
-              // interpolation between two stops whose values differ by exactly
-              // 2^22 reproduces the continuous 2^zoom curve exactly. accuracy
-              // and latScale come from the feature, so improved GPS fixes just
-              // need setData.
-              'circle-radius': [
-                'interpolate', ['exponential', 2], ['zoom'],
-                0, ['/', ['get', 'accuracy'], ['*', 78271.484, ['get', 'latScale']]],
-                22, ['/', ['*', ['get', 'accuracy'], 4194304], ['*', 78271.484, ['get', 'latScale']]],
-              ],
-            },
+      if (map.isStyleLoaded()) {
+        if (wantCircle) {
+          // Source first (data refreshes on every fix), then the layer if it
+          // is not up yet — checking the LAYER (not the source) as the init
+          // test makes this recover from a partial add instead of getting stuck.
+          if (!map.getSource(ACCURACY_LAYER)) {
+            map.addSource(ACCURACY_LAYER, {
+              type: 'geojson',
+              data: { type: 'FeatureCollection', features: [circleFeature] },
+            })
+          } else {
+            ;(map.getSource(ACCURACY_LAYER) as GeoJSONSource).setData(circleFeature)
+          }
+          if (!map.getLayer(ACCURACY_LAYER)) {
+            map.addLayer({
+              id: ACCURACY_LAYER,
+              type: 'circle',
+              source: ACCURACY_LAYER,
+              paint: {
+                'circle-color': '#FF3B30',
+                'circle-opacity': 0.08,
+                'circle-stroke-color': 'rgba(255, 59, 48, 0.35)',
+                'circle-stroke-width': 1,
+                'circle-pitch-alignment': 'map',
+                // True-scale radius: r(zoom) = accuracy · 2^zoom / (78271.484 ·
+                // cos(lat)). MapLibre only allows `zoom` inside interpolate/step,
+                // and interpolate CLAMPS outside its stop range — so the stops
+                // must span the whole zoom range (0…22). An exponential-base-2
+                // interpolation between two stops whose values differ by exactly
+                // 2^22 reproduces the continuous 2^zoom curve exactly. accuracy
+                // and latScale come from the feature, so improved GPS fixes just
+                // need setData.
+                'circle-radius': [
+                  'interpolate', ['exponential', 2], ['zoom'],
+                  0, ['/', ['get', 'accuracy'], ['*', 78271.484, ['get', 'latScale']]],
+                  22, ['/', ['*', ['get', 'accuracy'], 4194304], ['*', 78271.484, ['get', 'latScale']]],
+                ],
+              },
+            })
+          }
+        } else if (map.getSource(ACCURACY_LAYER)) {
+          // Calibration active (or accuracy gone) — clear any drawn circle.
+          ;(map.getSource(ACCURACY_LAYER) as GeoJSONSource).setData({
+            type: 'FeatureCollection',
+            features: [],
           })
         }
       }
@@ -230,11 +246,18 @@ export default function MapContainer({
 
     if (!userMarkerRef.current) {
       const el = document.createElement('div')
-      el.className = 'flex flex-col items-center'
+      el.className = `flex flex-col items-center${calibrated ? ' nr-calibrated' : ''}`
       el.setAttribute('role', 'img')
       const accuracy = typeof loc.accuracy === 'number' ? Math.round(loc.accuracy) : null
-      el.setAttribute('aria-label', `Your current location${accuracy ? ` (±${accuracy} m)` : ''}`)
-      el.title = accuracy ? `Your location · ±${accuracy} m` : 'Your current location'
+      const ariaLabel = calibrated
+        ? 'Your calibrated location (manually corrected)'
+        : `Your current location${accuracy ? ` (±${accuracy} m)` : ''}`
+      el.setAttribute('aria-label', ariaLabel)
+      el.title = calibrated
+        ? 'Your location · calibrated (use the target control to adjust or clear)'
+        : accuracy
+          ? `Your location · ±${accuracy} m`
+          : 'Your current location'
       el.innerHTML =
         '<div class="nr-userdot-halo"></div><div class="nr-userdot" style="margin-top:-15px"></div>'
       userMarkerRef.current = new Marker({ element: el })
@@ -243,8 +266,16 @@ export default function MapContainer({
     } else {
       const el = userMarkerRef.current.getElement()
       const accuracy = typeof loc.accuracy === 'number' ? Math.round(loc.accuracy) : null
-      el.setAttribute('aria-label', `Your current location${accuracy ? ` (±${accuracy} m)` : ''}`)
-      el.title = accuracy ? `Your location · ±${accuracy} m` : 'Your current location'
+      el.className = `flex flex-col items-center${calibrated ? ' nr-calibrated' : ''}`
+      const ariaLabel = calibrated
+        ? 'Your calibrated location (manually corrected)'
+        : `Your current location${accuracy ? ` (±${accuracy} m)` : ''}`
+      el.setAttribute('aria-label', ariaLabel)
+      el.title = calibrated
+        ? 'Your location · calibrated (use the target control to adjust or clear)'
+        : accuracy
+          ? `Your location · ±${accuracy} m`
+          : 'Your current location'
       userMarkerRef.current.setLngLat([loc.lng, loc.lat])
     }
   }

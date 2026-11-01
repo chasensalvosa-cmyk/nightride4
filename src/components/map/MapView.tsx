@@ -10,7 +10,7 @@ import { useSearchParams } from 'next/navigation'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import type { Map as MLMap } from 'maplibre-gl'
-import { MapPin, Radio, TriangleAlert } from 'lucide-react'
+import { LocateFixed, MapPin, Radio, TriangleAlert } from 'lucide-react'
 import MapContainer, { type MapBounds } from './MapContainer'
 import { MapControls } from './MapControls'
 import { MapLayers, type LayerStatus } from './MapLayers'
@@ -25,6 +25,16 @@ import { SaveLocationDialog, type SaveLocationDraft } from '@/components/shared/
 import { FlagDialog } from '@/components/shared/flag-dialog'
 import { StatusDot } from '@/components/shared/status'
 import { Button } from '@/components/ui/button'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { useMapStore, DEFAULT_VIEW } from '@/stores/map-store'
 import { useRealtimeStore } from '@/stores/realtime-store'
 import { useAuth } from '@/hooks/use-auth'
@@ -36,6 +46,7 @@ import { fetchRoute } from '@/services/map/routingService'
 import { fetchAviation } from '@/services/aviation/aviationService'
 import { fetchCameras } from '@/services/cameras/cameraService'
 import { fetchApiStatus } from '@/services/publicSafety/apiStatusService'
+import { haversineMeters, formatDistance } from '@/lib/geo'
 import type { CommunityReport, ReportCategory } from '@/types'
 
 const HAZARD_CATEGORIES: ReportCategory[] = ['road_hazard', 'damaged_road', 'construction', 'general_safety']
@@ -82,6 +93,8 @@ export default function MapView() {
     label?: string
   } | null>(null)
   const [activeRouteIdx, setActiveRouteIdx] = useState(0)
+  const [calibrating, setCalibrating] = useState(false)
+  const [calDialogOpen, setCalDialogOpen] = useState(false)
   const deepLinkApplied = useRef(false)
 
   // GPS: auto-start on mount — the browser asks for permission once, then the
@@ -428,6 +441,57 @@ export default function MapView() {
     }
   }, [stopPresence])
 
+  // ------------------------------------------------------------ position calibration
+  // Wi-Fi/network fixes can pin the rider a neighborhood or two away (the
+  // geolocation database maps their network to the wrong spot — no GPS
+  // option fixes that). Calibration lets them tap where they really are; the
+  // stored offset is applied to the dot, nearby search, routing and presence.
+  const startCalibration = useCallback(async () => {
+    setCalDialogOpen(false)
+    let fix = geo.coords
+    if (!fix) {
+      setLocating(true)
+      try {
+        fix = await geo.requestOnce()
+      } finally {
+        setLocating(false)
+      }
+    }
+    if (!fix) {
+      toast.error('Location unavailable', {
+        description:
+          geo.error ??
+          'Grant location permission first — calibration adjusts your live position fix.',
+      })
+      return
+    }
+    setSelection(null)
+    setCalibrating(true)
+    toast.info('Calibrate your position', {
+      description:
+        'Tap the map where you actually are — the dot, nearby search, routing and presence will use that spot.',
+    })
+  }, [geo.coords, geo.error, geo.requestOnce])
+
+  const handleCalibratePress = useCallback(() => {
+    // Already corrected → offer adjust/clear instead of silently restarting.
+    if (geo.calibration) {
+      setCalDialogOpen(true)
+      return
+    }
+    void startCalibration()
+  }, [geo.calibration, startCalibration])
+
+  // Escape cancels calibration mode, like every other transient mode.
+  useEffect(() => {
+    if (!calibrating) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setCalibrating(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [calibrating])
+
   // ------------------------------------------------------------ GPS + recenter + routing
   const recenter = useCallback(async () => {
     setLocating(true)
@@ -442,10 +506,15 @@ export default function MapView() {
         // Honest fix quality: GPS converges to tens of meters; Wi-Fi/network
         // positioning (desktop browsers) can be off by a neighborhood.
         const acc = Math.round(coords.accuracy)
-        if (acc > 150) {
+        if (coords.calibrated) {
+          toast.success('Centered — calibrated position', {
+            description:
+              'Using your manually corrected spot. Tap the target control to adjust or clear the correction.',
+          })
+        } else if (acc > 150) {
           toast.info(`Centered — ±${acc} m accuracy`, {
             description:
-              'Wi-Fi/network positioning. The red circle shows the real uncertainty — for street-level GPS precision use your phone.',
+              'Wi-Fi/network positioning. The red circle shows the real uncertainty — for street-level GPS precision use your phone, or calibrate with the target control.',
           })
         } else {
           toast.success(`Centered — ±${acc} m GPS accuracy`)
@@ -549,6 +618,29 @@ export default function MapView() {
         onReady={handleMapReady}
         onMoveEnd={(_view, b) => setBounds(b)}
         onMapClick={(lat, lng) => {
+          // Calibration mode: the tap IS the correction — store it and don't
+          // open the location panel.
+          if (calibrating) {
+            setCalibrating(false)
+            const cal = geo.calibrateTo(lat, lng)
+            if (cal) {
+              const shiftM = haversineMeters(
+                cal.anchorLat,
+                cal.anchorLng,
+                cal.anchorLat + cal.offsetLat,
+                cal.anchorLng + cal.offsetLng,
+              )
+              toast.success(`Location calibrated — moved ${formatDistance(shiftM)}`, {
+                description:
+                  'The map dot, nearby search, routing and presence now start from this spot. Tap the target control again to adjust or clear it.',
+              })
+            } else {
+              toast.error('Calibration failed', {
+                description: 'No live position fix to correct — tap recenter first, then try again.',
+              })
+            }
+            return
+          }
           setSelection({ kind: 'point', lat, lng })
           setSelectedMarkerId(null)
         }}
@@ -559,6 +651,7 @@ export default function MapView() {
                 lat: geo.coords.lat,
                 lng: geo.coords.lng,
                 accuracy: geo.coords.accuracy,
+                calibrated: geo.coords.calibrated,
               }
             : null
         }
@@ -595,19 +688,28 @@ export default function MapView() {
                 <StatusDot status={realtimeConnected ? 'connected' : 'missing'} />
                 Live
               </span>
-              {geo.coords && (
-                <span
-                  className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-text-muted"
-                  title={
-                    geo.coords.accuracy > 150
-                      ? 'Wi-Fi/network positioning — the red circle on the map shows the real uncertainty. Use a phone for street-level GPS precision.'
-                      : 'Live GPS accuracy of your position fix'
-                  }
-                >
-                  <StatusDot status={geo.coords.accuracy > 150 ? 'missing' : 'connected'} />
-                  GPS ±{Math.max(5, Math.round(geo.coords.accuracy))} m
-                </span>
-              )}
+              {geo.coords &&
+                (geo.coords.calibrated ? (
+                  <span
+                    className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-text-muted"
+                    title="Your device's fix was corrected by your calibration — this spot is used for the map dot, nearby search, routing and presence."
+                  >
+                    <StatusDot status="connected" />
+                    GPS calibrated
+                  </span>
+                ) : (
+                  <span
+                    className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-text-muted"
+                    title={
+                      geo.coords.accuracy > 150
+                        ? 'Wi-Fi/network positioning — the red circle on the map shows the real uncertainty. Calibrate with the target control, or use a phone for street-level GPS precision.'
+                        : 'Live GPS accuracy of your position fix'
+                    }
+                  >
+                    <StatusDot status={geo.coords.accuracy > 150 ? 'missing' : 'connected'} />
+                    GPS ±{Math.max(5, Math.round(geo.coords.accuracy))} m
+                  </span>
+                ))}
               <span className="ml-auto hidden text-[10px] text-text-muted md:inline">
                 {basemapLabel}
               </span>
@@ -686,8 +788,34 @@ export default function MapView() {
             <TriangleAlert className="h-3.5 w-3.5" aria-hidden />
             Report
           </Button>
-          <MapControls onRecenter={recenter} locating={locating} />
+          <MapControls
+            onRecenter={recenter}
+            locating={locating}
+            onCalibrate={handleCalibratePress}
+            calibrating={calibrating}
+            calibrated={!!geo.calibration}
+          />
         </div>
+
+        {/* calibration mode: floating instruction pill (above mobile sheets) */}
+        {calibrating && (
+          <div className="absolute bottom-32 left-1/2 z-20 -translate-x-1/2 md:bottom-8">
+            <div className="pointer-events-auto flex items-center gap-2.5 rounded-lg border border-primary/40 bg-panel/95 px-3 py-2 shadow-lg backdrop-blur-sm">
+              <LocateFixed className="h-4 w-4 animate-pulse text-primary" aria-hidden />
+              <p className="text-xs text-text-secondary">
+                Tap the map where you <span className="font-medium text-foreground">actually are</span>
+              </p>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 px-2 text-xs"
+                onClick={() => setCalibrating(false)}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
 
         {/* bottom-left: legend (desktop only) */}
         <div className="absolute bottom-8 left-3 z-10 hidden md:block">
@@ -745,6 +873,35 @@ export default function MapView() {
 
       <ReportSheet open={reportOpen} draft={reportDraft} onOpenChange={setReportOpen} />
       <SaveLocationDialog open={saveOpen} draft={saveDraft} onOpenChange={setSaveOpen} />
+
+      {/* calibration active → adjust or clear the stored correction */}
+      <AlertDialog open={calDialogOpen} onOpenChange={setCalDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Location calibration is active</AlertDialogTitle>
+            <AlertDialogDescription>
+              Your position was manually corrected on the map — the dot, nearby search, routing and
+              presence use the corrected spot. What would you like to do?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep it</AlertDialogCancel>
+            <Button variant="secondary" onClick={() => void startCalibration()}>
+              Recalibrate
+            </Button>
+            <AlertDialogAction
+              onClick={() => {
+                geo.clearCalibration()
+                toast.info('Calibration cleared', {
+                  description: "Back to your device's raw position fix.",
+                })
+              }}
+            >
+              Use device fix
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       <FlagDialog
         open={flagOpen}
         onOpenChange={setFlagOpen}

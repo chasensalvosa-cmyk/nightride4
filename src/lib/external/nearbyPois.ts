@@ -1,9 +1,12 @@
 // NIGHTRIDE — nearby category browse ("food near me", "groceries", …).
 // Two real-data engines, merged:
-//   1. Nominatim category words — always reachable, serialized through the
-//      module's >=1.1 s throttle (usage policy). Searching the category WORD
-//      ("restaurant", "gas station") inside the rider's ±35 km box returns
-//      real POIs of that type.
+//   1. Nominatim words — always reachable, serialized through the module's
+//      >=1.1 s throttle (usage policy). Category words ("restaurant", "gas
+//      station") plus brand words ("McDonald's", "Smith's"…) inside the
+//      rider's ±35 km box: Nominatim ranks category words by relevance, not
+//      proximity, which can skip the McDonald's 400 m away while listing an
+//      Arby's 3 km out — the brand words close that recall gap even when
+//      engine 2 is unreachable.
 //   2. Photon brand-term fan-out — brand-diverse results (McDonald's, Dutch
 //      Bros, Smith's…), best-effort: when Photon is unreachable the
 //      Nominatim words carry the category alone.
@@ -26,6 +29,19 @@ const CATEGORY_WORDS: Record<PoiCategory, string[]> = {
   fuel: ['gas station', 'fuel'],
   atm: ['atm', 'bank'],
   hotel: ['hotel', 'motel'],
+}
+
+/** Category → Nominatim brand words. Literal names with the apostrophe
+ *  included ("mcdonalds" finds nothing, "McDonald's" works — searchBounded
+ *  does not do the apostrophe-variant retry). Few, high-signal terms only:
+ *  each costs one serialized throttled request (~1.1 s) on a cache miss. */
+const BRAND_WORDS: Record<PoiCategory, string[]> = {
+  food: ["McDonald's", 'Taco Bell', 'Subway'],
+  coffee: ['Starbucks', 'Dutch Bros'],
+  groceries: ["Smith's", 'Walmart'],
+  fuel: ['Chevron', 'Shell'],
+  atm: [],
+  hotel: [],
 }
 
 /** OSM type values (Nominatim `type` / Photon `osm_value`) that belong to
@@ -54,6 +70,7 @@ export async function browseNearbyCategory(
   near: { lat: number; lng: number },
 ): Promise<NearbyResult[]> {
   const words = CATEGORY_WORDS[category] ?? []
+  const brands = BRAND_WORDS[category] ?? []
   const preset = POI_CATEGORIES[category]
 
   // Both engines in parallel; each degrades independently.
@@ -65,6 +82,13 @@ export async function browseNearbyCategory(
         // enough candidates for the distance sort to surface the near ones.
         // Serialized inside searchBounded by the Nominatim throttle.
         pooled.push(...(await searchBounded(w, near, 30)))
+      }
+      // Brand words run after the category words (same throttle queue) and
+      // close the chain-recall gap: nearest McDonald's / Smith's / Starbucks
+      // reliably appear even when the category word's relevance ranking
+      // skipped them. A smaller limit — brands have few branches in range.
+      for (const b of brands) {
+        pooled.push(...(await searchBounded(b, near, 12)))
       }
       return pooled
     })(),

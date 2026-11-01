@@ -13,6 +13,7 @@ import { AuthGate, Panel, SectionHeader } from '@/components/shared/panels'
 import { useAuth } from '@/hooks/use-auth'
 import { useGeolocation } from '@/hooks/use-geolocation'
 import { api } from '@/lib/api-client'
+import { haversineMeters, formatDistance } from '@/lib/geo'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
@@ -104,12 +105,33 @@ export default function SettingsPage() {
         <SectionHeader label="Location permissions" icon={KeyRound} />
         <div className="space-y-2 px-4 pb-4">
           <InfoRow label="Browser permission" value={permission} />
+          <InfoRow
+            label="Position calibration"
+            value={
+              geo.calibration
+                ? `Active — corrected ${formatDistance(
+                    haversineMeters(
+                      geo.calibration.anchorLat,
+                      geo.calibration.anchorLng,
+                      geo.calibration.anchorLat + geo.calibration.offsetLat,
+                      geo.calibration.anchorLng + geo.calibration.offsetLng,
+                    ),
+                  )}`
+                : 'Off'
+            }
+          />
           <p className="text-[11px] leading-relaxed text-text-secondary">
             {permission === 'granted'
               ? 'Granted — the map can center on you and ride tracking is available.'
               : permission === 'denied'
                 ? 'Denied — re-enable it in your browser site settings. Ride tracking and the rider-location dot stay off (never simulated).'
                 : 'Not decided yet — the map and ride tracker will ask the first time you use them.'}
+          </p>
+          <p className="text-[11px] leading-relaxed text-text-secondary">
+            Wi-Fi/network positioning can pin you streets or even neighborhoods away (a geolocation
+            database error — your device reports the wrong fix). On the map, tap the target control
+            below the recenter button to tell NIGHTRIDE where you really are: the correction applies
+            to the map dot, nearby places, routing and presence, and is stored on this browser only.
           </p>
           <div className="flex gap-2">
             <Button
@@ -125,6 +147,20 @@ export default function SettingsPage() {
             >
               Test location access
             </Button>
+            {geo.calibration && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  geo.clearCalibration()
+                  toast.info('Calibration cleared', {
+                    description: "Back to your device's raw position fix.",
+                  })
+                }}
+              >
+                Clear calibration
+              </Button>
+            )}
           </div>
         </div>
       </Panel>
