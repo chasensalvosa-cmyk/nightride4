@@ -14,6 +14,7 @@ import {
   LogIn,
   Mountain,
   ShieldAlert,
+  Siren,
   TriangleAlert,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -156,6 +157,7 @@ const CATEGORY_ICONS: Record<ReportCategory, LucideIcon> = {
   charging_station: BatteryCharging,
   riding_location: Mountain,
   general_safety: ShieldAlert,
+  police_activity: Siren,
 }
 
 export function CategoryBadge({

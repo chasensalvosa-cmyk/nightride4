@@ -198,33 +198,48 @@ export async function GET() {
     ),
     check(
       'cameras',
-      'Traffic camera provider',
+      'DeFlock / OpenStreetMap (ALPR) or municipal provider',
       'Public traffic cameras',
       async () => {
-        if (!isCameraProviderConfigured()) {
+        if (isCameraProviderConfigured()) {
+          const result = await fetchWithCache({
+            key: 'status:cameras',
+            ttl: 120_000,
+            source: 'Camera provider',
+            attribution: '',
+            fetcher: fetchProviderCameras,
+          })
+          if (result.freshness === 'unavailable') {
+            return { status: 'unreachable', detail: result.note ?? 'No response.' }
+          }
           return {
-            status: 'missing',
-            detail:
-              'No official camera API configured (TRAFFIC_CAMERA_API_URL). ' +
-              'Layer shows an explicit not-configured state — camera positions are never invented.',
+            status: 'connected',
+            detail: `Provider camera inventory received (${(result.data?.cameras ?? []).length} cameras).`,
           }
         }
-        const result = await fetchWithCache({
-          key: 'status:cameras',
-          ttl: 120_000,
-          source: 'Camera provider',
-          attribution: '',
-          fetcher: fetchProviderCameras,
-        })
-        if (result.freshness === 'unavailable') {
-          return { status: 'unreachable', detail: result.note ?? 'No response.' }
+        const synced = await db.publicCameraLocation.count()
+        if (synced > 0) {
+          const newest = await db.publicCameraLocation.findFirst({
+            orderBy: { lastVerifiedAt: 'desc' },
+            select: { lastVerifiedAt: true },
+          })
+          return {
+            status: 'connected',
+            detail:
+              `${synced.toLocaleString('en-US')} ALPR cameras from the DeFlock / OpenStreetMap ` +
+              `inventory (last verified ${newest?.lastVerifiedAt.toISOString().slice(0, 10)}). ` +
+              'Refresh with `bun scripts/sync-alpr-cameras.ts`.',
+          }
         }
         return {
-          status: 'connected',
-          detail: `Camera inventory received (${(result.data?.cameras ?? []).length} cameras).`,
+          status: 'missing',
+          detail:
+            'No camera source available. Run `bun scripts/sync-alpr-cameras.ts` to import the ' +
+            'DeFlock / OpenStreetMap ALPR inventory (keyless), or set TRAFFIC_CAMERA_API_URL to an ' +
+            'official municipal camera API. Camera positions are never invented.',
         }
       },
-      { configVar: 'TRAFFIC_CAMERA_API_URL', configUrl: 'https://www.wsdot.wa.gov/traffic/api/' },
+      { configVar: 'TRAFFIC_CAMERA_API_URL (optional)', configUrl: 'https://www.wsdot.wa.gov/traffic/api/' },
     ),
     check(
       'supabase',

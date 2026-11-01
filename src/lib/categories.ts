@@ -41,6 +41,11 @@ export const REPORT_CATEGORY_META: Record<
     short: 'Safety',
     description: 'Any other rider-safety observation',
   },
+  police_activity: {
+    label: 'Police activity',
+    short: 'Police',
+    description: 'Community-reported police presence — checkpoint, patrol parked, activity. Auto-expires after 2 hours',
+  },
 }
 
 export const REPORT_CATEGORIES = Object.keys(REPORT_CATEGORY_META) as ReportCategory[]
@@ -69,6 +74,8 @@ export function layerForCategory(category: ReportCategory) {
       return 'riding_areas' as const
     case 'charging_station':
       return 'charging' as const
+    case 'police_activity':
+      return 'police_activity' as const
     default:
       return 'road_hazards' as const
   }

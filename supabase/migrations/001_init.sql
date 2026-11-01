@@ -56,7 +56,7 @@ create table community_reports (
   description         text not null,
   category            text not null check (category in
                         ('road_hazard','damaged_road','construction','road_closure',
-                         'charging_station','riding_location','general_safety')),
+                         'charging_station','riding_location','general_safety','police_activity')),
   latitude            double precision not null,
   longitude           double precision not null,
   location_label      text,
@@ -64,11 +64,14 @@ create table community_reports (
   verification_status text not null default 'unverified'
                       check (verification_status in ('unverified','confirmed','disputed')),
   hidden              boolean not null default false,
+  -- transient sightings (police_activity) auto-expire; null = permanent
+  expires_at          timestamptz,
   created_at          timestamptz not null default now(),
   updated_at          timestamptz not null default now()
 );
 create index community_reports_feed_idx on community_reports (created_at desc);
 create index community_reports_geo_idx on community_reports (latitude, longitude);
+create index community_reports_expiry_idx on community_reports (expires_at);
 
 -- ---------------------------------------------------------------- report_comments
 create table report_comments (
@@ -106,13 +109,18 @@ create table abuse_flags (
 -- verified import with source_url + last_verified_at) may write.
 create table public_camera_locations (
   id               uuid primary key default uuid_generate_v4(),
+  external_key     text unique not null,          -- e.g. 'osm:node/123' — idempotent syncs
   name             text not null,
+  brand            text,                          -- Flock Safety, Motorola Solutions, …
   latitude         double precision not null,
   longitude        double precision not null,
-  camera_type      text not null default 'traffic',
+  camera_type      text not null default 'traffic' check (camera_type in ('traffic','alpr')),
   source_url       text not null,
+  source_name      text not null default '',      -- DeFlock · OpenStreetMap, WSDOT, …
   last_verified_at timestamptz not null default now()
 );
+create index public_camera_geo_idx on public_camera_locations (latitude, longitude);
+create index public_camera_type_idx on public_camera_locations (camera_type);
 
 create table public_safety_events (
   id          uuid primary key default uuid_generate_v4(),

@@ -13,8 +13,8 @@
 | **8 routes** — /dashboard /map /community /rides /saved /activity /settings /profile, each with its own page component + /auth/login + /auth/register; `/` redirects to /dashboard | ✅ | Browser-verified: every route renders, navigation works |
 | **Dashboard** — welcome header, rider status (account/GPS/ride/realtime/providers), quick map, recent ride, nearby reports, road condition alerts, public safety announcements (NWS), saved locations | ✅ | Browser-verified |
 | **Live map** — MapLibre GL dark map (OpenFreeMap dark vector, keyless; Esri World Dark Gray keyless raster fallback; Mapbox dark-v11 when a token exists), search (Nominatim, debounced), recenter + zoom controls, location details panel with reverse geocoding, report submission, loading states, API status chip, legend | ✅ | Browser-verified: tiles render (pixel-checked), search flies to results, controls work |
-| **7 independent map layers** — Rider Locations (consent presence), Public Traffic Cameras, Road Hazards, Road Closures, Charging Stations (OSM/Overpass), Legal Riding Areas, Public Aviation Awareness (OpenSky) — each independently toggleable, honest empty/unavailable states, **no invented coordinates** | ✅ | Browser-verified: toggles persist, aviation rate-limit state shown, cameras show "not configured" |
-| **Community** — submit / filter (7 categories, status, newest/nearest) / view reports; comments; confirmations (2 distinct → verified); resolve/reopen (community), close/delete (author); abuse flags with 3-flag auto-hide | ✅ | API suite + browser E2E |
+| **8 independent map layers** — Rider Locations (consent presence), Cameras & ALPR (**DeFlock/OSM inventory — 145k ALPR cameras, 116k Flock Safety — live**), Road Hazards, Road Closures, Charging Stations (OSM/Overpass), Legal Riding Areas, Public Aviation Awareness (OpenSky), Police Activity (community sightings, 2 h auto-expiry) — each independently toggleable, honest empty/unavailable states, **no invented coordinates** | ✅ | Browser-verified: Atlanta viewport renders 246 ALPR markers; toggles persist; aviation rate-limit state shown |
+| **Community** — submit / filter (8 categories incl. police activity, status, newest/nearest) / view reports; comments; confirmations (2 distinct → verified); resolve/reopen (community), close/delete (author); abuse flags with 3-flag auto-hide; **police sightings auto-expire after 2 h** (stale enforcement positions are filtered server-side) | ✅ | API suite + browser E2E: expiry lifecycle tested (create → visible → expired → filtered) |
 | **Ride tracking** — GPS start/pause/resume/end; distance, duration, avg/max speed; accuracy filter (>75 m ignored), jitter rejection; 10 s server sync with offline queue + retry; **page-refresh recovery** (resume/discard with honest gap note); history with route replay; delete | ✅ | Browser E2E with simulated fixes: 6 points, 268.2 m, avg/max speeds persisted |
 | **GPS honesty** — explicit permission required; denied/unavailable/poor-accuracy/lost-sync states surfaced; never simulates a ride | ✅ | Browser-verified (headless denial state) |
 | **Saved locations** — save/name/describe/categorize/delete, deep-link "View on map" | ✅ | API suite + browser |
@@ -27,11 +27,12 @@
 
 ## 2. Features partially completed (by design)
 
-- **Mapbox dark-v11 basemap** — fully coded (style, token flow, attribution) and switches on the
-  moment `NEXT_PUBLIC_MAPBOX_TOKEN` is set; the app runs on the keyless OpenFreeMap dark vector
-  basemap until then (Mapbox reported honestly as *Not configured* in Settings → Connected APIs).
-  If OpenFreeMap is unreachable, the keyless Esri World Dark Gray raster basemap boots instead —
-  the active provider is resolved live at every map boot and shown in the map status chip.
+- **Mapbox dark-v11 basemap** — coded and switches on the moment `NEXT_PUBLIC_MAPBOX_TOKEN` is set;
+  until then the keyless OpenFreeMap dark vector basemap runs (Esri World Dark Gray raster as
+  keyless emergency fallback), resolved live at every map boot and shown in the status chip.
+- **Municipal traffic-camera provider** (`TRAFFIC_CAMERA_API_URL`, e.g. WSDOT) — optional upgrade over
+  the already-live keyless DeFlock/OSM ALPR inventory; the integration is coded and activates the
+  moment the variable is set.
 - **Supabase (Postgres + Auth + Realtime)** — complete production DDL with **Row Level Security**
   policies + RLS test script + deployment README in `supabase/`. This deployment uses local
   Prisma/SQLite with equivalent API-layer ownership enforcement (tested), because no Supabase
@@ -44,13 +45,13 @@
 
 | Feature | Env var | Obtain at |
 |---|---|---|
-| Mapbox dark-v11 basemap | `NEXT_PUBLIC_MAPBOX_TOKEN` | https://account.mapbox.com/access-tokens/ |
-| Public traffic cameras layer | `TRAFFIC_CAMERA_API_URL` (+ `TRAFFIC_CAMERA_API_KEY`) | e.g. WSDOT Traveler API — https://www.wsdot.wa.gov/traffic/api/ |
+| Municipal traffic cameras (optional upgrade over DeFlock/OSM) | `TRAFFIC_CAMERA_API_URL` (+ `TRAFFIC_CAMERA_API_KEY`) | e.g. WSDOT Traveler API — https://www.wsdot.wa.gov/traffic/api/ |
 | Production database/auth | `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` | https://supabase.com/dashboard |
 | Higher OpenSky rate limits (optional) | `AVIATION_PROVIDER_API_KEY` | https://opensky-network.org/my-opensky/api-client-credentials |
 
-Until configured: cameras show "No provider configured" (never estimated), Mapbox falls back to
-the keyless OpenFreeMap dark basemap, Supabase reports "Not configured — local persistence active".
+Until configured: the map runs on the keyless **DeFlock / OpenStreetMap ALPR inventory** (synced
+locally — 145,091 cameras incl. 116,502 Flock Safety), Mapbox falls back to the keyless
+OpenFreeMap dark basemap, and Supabase reports "Not configured — local persistence active".
 
 ## 4. Database setup
 
@@ -84,7 +85,7 @@ Supabase key stays server-side only.
 |---|---|
 | TypeScript (`bunx tsc --noEmit`, build errors NOT ignored) | ✅ 0 errors |
 | ESLint (`bun run lint`) | ✅ 0 errors, 0 warnings |
-| Automated API suite (`bun scripts/api-tests.mjs`) | ✅ **66/66 passed** — auth, rides CRUD + ownership isolation, reports/comments/confirmations/verification threshold/moderation, saved locations, external providers (live or honest states), status matrix, settings/export/delete cascade, client-bundle secret scan (5 pages + 31 scripts) |
+| Automated API suite (`bun scripts/api-tests.mjs`) | ✅ **77/77 passed** — auth, rides CRUD + ownership isolation, reports/comments/confirmations/verification threshold/moderation, police-activity auto-expiry lifecycle, saved locations, external providers incl. DeFlock/OSM ALPR inventory (Atlanta bbox, brand + attribution + bbox bounds, ocean bbox = 0), status matrix, settings/export/delete cascade, client-bundle secret scan (5 pages + 31 scripts) |
 | Browser E2E (agent-browser, desktop 1440×900 + mobile 390×844) | ✅ all routes render; map tiles pixel-verified; search/zoom/recenter/layers/report-submit/comment/resolve/settings-toggle/ride-lifecycle/recovery/presence/live-toast verified; 0 page errors |
 | Realtime | ✅ presence sharing (marker + service state), cross-user event push |
 | Secrets in client bundle | ✅ none found |
@@ -112,12 +113,20 @@ Supabase key stays server-side only.
    → Esri World Dark Gray (raster, keyless last resort), with Mapbox dark-v11 still activating the
    moment `NEXT_PUBLIC_MAPBOX_TOKEN` is set. The `/api/status` basemap check now validates the
    style document / image content instead of trusting a bare HTTP 200.
+8. **ALPR inventory freshness** — the DeFlock/OSM camera dataset is community-mapped, so coverage
+   varies by region (dense in metros, sparse rural) and is only as current as the last sync.
+   Refresh with `bun scripts/sync-alpr-cameras.ts` (auto-skips if synced within 7 days); the map
+   panel always shows each camera's source and verification date.
+9. **Police-activity sightings are unverified community reports** — they auto-expire after 2 h and
+   are filtered server-side once expired, but accuracy depends on the reporting rider. No live
+   law-enforcement position feed exists anywhere (by design — see API_RESEARCH.md §4).
 
 ## 8. How to start
 
 ```bash
 bun install
 bun run db:push                                          # local SQLite schema
+bun scripts/sync-alpr-cameras.ts                         # DeFlock/OSM ALPR inventory (145k cameras)
 bun run dev                                              # app on http://localhost:3000
 cd mini-services/realtime-service && bun install && bun run dev   # realtime :3003/:3004
 ```
@@ -136,5 +145,6 @@ cd mini-services/realtime-service && bun install && bun run dev   # realtime :30
 - **Database**: `prisma/schema.prisma` + `supabase/migrations/001_init.sql` (RLS) +
   `supabase/tests/rls-test.sql` + `supabase/README.md`.
 - **Docs**: `DEVELOPMENT_PLAN.md`, `API_RESEARCH.md`, this report, `.env.example`.
-- **Tests/tooling**: `scripts/api-tests.mjs` (66 assertions), `scripts/reset-local-data.ts`,
+- **Tests/tooling**: `scripts/api-tests.mjs` (77 assertions), `scripts/sync-alpr-cameras.ts`
+  (DeFlock/OSM ALPR inventory sync), `scripts/reset-local-data.ts`,
   `scripts/sync-maplibre-worker.sh`.

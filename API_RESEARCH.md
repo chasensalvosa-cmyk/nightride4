@@ -56,11 +56,42 @@ Legend for integration difficulty: 🟢 low (no key, REST/JSON) · 🟡 medium (
 > raster as the guaranteed keyless last resort. A CARTO key can be reintroduced as an optional
 > provider later if desired; Mapbox remains the optional premium path (`NEXT_PUBLIC_MAPBOX_TOKEN`).
 
-**Chosen strategy:** MapLibre GL renders Mapbox dark-v11 when a token is present; otherwise the
+**Chosen strategy (§1.2):** MapLibre GL renders Mapbox dark-v11 when a token is present; otherwise the
 keyless OpenFreeMap dark vector style (fetched + validated client-side at boot), falling back to
 keyless Esri World Dark Gray raster tiles when OpenFreeMap is unreachable. Map search uses
 server-proxied Nominatim with a 24 h cache and min-interval guard; charging stations use
 `overpass.osm.ch` with automatic fallback mirrors and a 10 min cache.
+
+### 1.3 DeFlock / OpenStreetMap ALPR cameras (CHOSEN — keyless)
+
+| Field | Value |
+|---|---|
+| Provider | DeFlock — community-mapped ALPR camera inventory built on OpenStreetMap tags (man_made=surveillance, surveillance=ALPR) |
+| Official docs | https://deflock.org , https://maps.deflock.org , https://wiki.openstreetmap.org/wiki/Tag:man_made%3Dsurveillance |
+| Authentication | None |
+| Credentials needed | None |
+| Endpoints used | `GET https://data.dontgetflocked.com/cameras.geojson.gz` (full dump, ~37 MB) — served via browser-UA requests; the interactive map's API (`api.dontgetflocked.com`) is Cloudflare-protected and NOT used |
+| Data fields | FeatureCollection → Point coordinates + osmId/osmType/osmTimestamp, brand (Flock Safety, Motorola Solutions, Genetec, Axis, Leonardo), ref, startDate |
+| Dataset size | 145,091 cameras (116,502 Flock Safety) as of 2026-11 |
+| Update frequency | Community-mapped; dump refreshed periodically (OSM timestamps per feature) |
+| Coverage | US + parts of CA/EU — dense in metros, sparse rural |
+| Pricing | Free (ODbL via OpenStreetMap) |
+| Rate limits | None documented for the static dump — synced server-side into the local DB and served bbox-filtered from there, so riders never hit the CDN |
+| Commercial use | ODbL 1.0 attribution: "© OpenStreetMap contributors · DeFlock (deflock.org)" |
+| Difficulty | 🟢 |
+| **Live test** | Full dump downloaded (37.1 MB → 145,091 features); Atlanta bbox query returns 1,281 cameras (357 Flock in a tighter viewport); ocean bbox returns 0 (never invented) |
+
+**Chosen strategy:** the dump is synced server-side into `public_camera_locations`
+(`bun scripts/sync-alpr-cameras.ts`, auto-skips within 7 days) and the map queries the local DB
+per viewport (cap 750). Camera markers show brand, type (ALPR vs traffic), source and verification
+date; no live video feed is ever accessed.
+
+> **Why not a live police-location feed:** no law-enforcement agency publishes real-time unit
+> positions, and NIGHTRIDE's spec explicitly forbids identifying/following law-enforcement aircraft
+> or bypassing privacy restrictions. Police presence is therefore handled as **transient community
+> sightings** (the `police_activity` report category, auto-expiring after 2 h) — the same model
+> Waze and Exit51 use. The aviation layer shows all ADS-B aircraft equally (OpenSky), with no
+classification or targeting of law-enforcement flights.
 
 ---
 
@@ -170,11 +201,12 @@ server-proxied Nominatim with a 24 h cache and min-interval guard; charging stat
 |---|---|---|
 | Basemap | Mapbox dark-v11 → OpenFreeMap dark (keyless vector) → Esri World Dark Gray (keyless raster) | OpenFreeMap live now (probed each boot); Mapbox ready, awaiting token |
 | Rider locations | Socket.IO presence, explicit consent | Live (empty unless riders consent — by design) |
-| Traffic cameras | WSDOT-style provider module | **Not configured** (explicit state) — table ready for verified inventories |
+| Traffic cameras / ALPR | DeFlock · OpenStreetMap (keyless, synced) → optional municipal provider | **Live** — 145,091 ALPR cameras synced (116,502 Flock Safety) |
 | Road hazards | Community reports (DB) | Live |
 | Road closures | Community reports (DB) | Live |
 | Charging stations | Overpass `overpass.osm.ch` (OSM POIs) | Live (verified) |
 | Legal riding areas | Community reports (DB) | Live |
+| Police activity | Community reports (transient, 2 h auto-expiry) | Live — no live law-enforcement feed exists or is used (by design) |
 | Aviation awareness | OpenSky Network anonymous | Live (verified) |
 | Public safety announcements | NWS active alerts (synced to DB) | Live (verified) |
 | Map search / reverse geocode | Nominatim (server-proxied, cached) | Live (verified) |

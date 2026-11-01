@@ -10,6 +10,8 @@ export type MarkerIconName =
   | 'riding'
   | 'safety'
   | 'camera'
+  | 'alpr'
+  | 'police'
   | 'plane'
   | 'rider'
   | 'pin'
@@ -42,6 +44,12 @@ const ICONS: Record<MarkerIconName, string> = {
   ),
   camera: stroke(
     '<path d="M3 8.5A1.5 1.5 0 0 1 4.5 7H8l1.4-2h3.2L14 7h2.5A1.5 1.5 0 0 1 18 8.5v7A1.5 1.5 0 0 1 16.5 17h-12A1.5 1.5 0 0 1 3 15.5Z"/><circle cx="10.5" cy="12" r="3"/>',
+  ),
+  alpr: stroke(
+    '<rect x="3" y="5.5" width="15" height="11" rx="1.5"/><path d="M5.5 8.5h6"/><path d="M5.5 11h4"/><path d="M5.5 13.5h5"/><circle cx="15" cy="12.5" r="1.6"/>',
+  ),
+  police: stroke(
+    '<path d="M10.5 3.5c.4 1.7 1.9 2.2 1.9 3.9a1.9 1.9 0 0 1-3.8 0c0-1.7 1.5-2.2 1.9-3.9Z"/><path d="M4.5 13h12"/><path d="M6 13v4.5M15 13v4.5M4.5 17.5h12"/><path d="M6.2 13c.3-2.2 2-3.5 4.3-3.5s4 1.3 4.3 3.5"/>',
   ),
   plane: stroke(
     '<path d="M10.5 2.6c.55 0 1 .9 1 2v4.1l6.3 3.5v1.7l-6.3-1.9v3.6l1.9 1.5v1.4l-2.9-.9-2.9.9v-1.4l1.9-1.5v-3.6L3.2 13.9v-1.7l6.3-3.5V4.6c0-1.1.45-2 1-2Z"/>',

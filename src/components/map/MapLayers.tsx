@@ -14,6 +14,7 @@ import {
   Mountain,
   Plane,
   Radio,
+  Siren,
   TriangleAlert,
   Video,
   OctagonX,
@@ -36,12 +37,13 @@ interface LayerMeta {
 
 export const LAYER_META: LayerMeta[] = [
   { id: 'riders', label: 'Rider Locations', icon: Radio, description: 'Consenting riders sharing live presence' },
-  { id: 'cameras', label: 'Public Traffic Cameras', icon: Video, description: 'Official municipal camera inventory' },
+  { id: 'cameras', label: 'Cameras & ALPR', icon: Video, description: 'Flock/ALPR + municipal cameras (open data)' },
   { id: 'road_hazards', label: 'Road Hazards', icon: TriangleAlert, description: 'Hazards, damage, construction, safety' },
   { id: 'road_closures', label: 'Road Closures', icon: OctagonX, description: 'Community-reported closures' },
   { id: 'charging', label: 'Charging Stations', icon: BatteryCharging, description: 'OpenStreetMap charging points' },
   { id: 'riding_areas', label: 'Legal Riding Areas', icon: Mountain, description: 'Community-shared riding locations' },
   { id: 'aviation', label: 'Public Aviation Awareness', icon: Plane, description: 'General air traffic (OpenSky)' },
+  { id: 'police_activity', label: 'Police Activity', icon: Siren, description: 'Community sightings — expire after 2 h' },
 ]
 
 export interface LayerStatus {

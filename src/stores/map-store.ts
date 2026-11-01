@@ -23,6 +23,7 @@ const ALL_LAYERS: MapLayerId[] = [
   'charging',
   'riding_areas',
   'aviation',
+  'police_activity',
 ]
 
 interface MapState {
@@ -41,12 +42,13 @@ export const useMapStore = create<MapState>()(
       view: DEFAULT_VIEW,
       layers: {
         riders: false, // presence is consent-gated; off by default
-        cameras: false, // needs configured provider; off by default
+        cameras: false, // ALPR/traffic inventory; off by default (dense in some areas)
         road_hazards: true,
         road_closures: true,
         charging: true,
         riding_areas: false,
         aviation: false,
+        police_activity: true, // community sightings; auto-expire after 2 h
       },
       basemap: activeBasemap(),
       setView: (view) =>
@@ -61,6 +63,17 @@ export const useMapStore = create<MapState>()(
       name: 'nightride-map',
       // Persist only the durable UI state — basemap is re-resolved each boot.
       partialize: (s) => ({ view: s.view, layers: s.layers }) as unknown as MapState,
+      // Merge persisted state over defaults key-by-key so sessions saved BEFORE
+      // a new layer id shipped still pick the new layer's default visibility.
+      merge: (persisted, current) => {
+        const p = (persisted ?? {}) as Partial<MapState>
+        return {
+          ...current,
+          ...p,
+          view: { ...current.view, ...(p.view ?? {}) },
+          layers: { ...current.layers, ...(p.layers ?? {}) },
+        } as MapState
+      },
     },
   ),
 )

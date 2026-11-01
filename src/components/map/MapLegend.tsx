@@ -9,12 +9,13 @@ import { cn } from '@/lib/utils'
 
 const LAYER_ICONS: Record<string, MarkerIconName[]> = {
   riders: ['rider'],
-  cameras: ['camera'],
+  cameras: ['alpr', 'camera'],
   road_hazards: ['hazard', 'damage', 'construction', 'safety'],
   road_closures: ['closure'],
   charging: ['charging'],
   riding_areas: ['riding'],
   aviation: ['plane'],
+  police_activity: ['police'],
 }
 
 const ICON_LABELS: Record<MarkerIconName, string> = {
@@ -26,6 +27,8 @@ const ICON_LABELS: Record<MarkerIconName, string> = {
   riding: 'Riding area',
   safety: 'Safety report',
   camera: 'Traffic camera',
+  alpr: 'ALPR camera',
+  police: 'Police activity',
   plane: 'Aircraft',
   rider: 'Rider (consented)',
   pin: 'Location',

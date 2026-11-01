@@ -8,7 +8,7 @@ import { getCurrentUser } from '@/lib/auth'
 import { serializeReport } from '@/lib/serialize'
 import { reportCreateSchema } from '@/lib/validators'
 import { broadcast } from '@/lib/realtime'
-import { REPORT_CATEGORIES } from '@/lib/validators'
+import { REPORT_CATEGORIES, POLICE_ACTIVITY_TTL_MS } from '@/lib/validators'
 import type { CommunityReport } from '@/types'
 
 export async function GET(req: Request) {
@@ -31,6 +31,8 @@ export async function GET(req: Request) {
   const hasRef = Number.isFinite(lat) && Number.isFinite(lng)
   const where = {
     hidden: false,
+    // Transient sightings (police activity) disappear once expired.
+    OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
     ...(categories.length > 0 ? { category: { in: categories } } : {}),
     ...(status && ['open', 'resolved', 'closed'].includes(status) ? { status } : {}),
     ...(author ? { user: { username: author } } : {}),
@@ -99,6 +101,11 @@ export async function POST(req: Request) {
       latitude: parsed.data.latitude,
       longitude: parsed.data.longitude,
       locationLabel: parsed.data.locationLabel ?? null,
+      // Police sightings are transient — they auto-expire so the map never
+      // shows stale enforcement positions.
+      ...(parsed.data.category === 'police_activity'
+        ? { expiresAt: new Date(Date.now() + POLICE_ACTIVITY_TTL_MS) }
+        : {}),
     },
     include: {
       user: { select: { username: true, avatarUrl: true } },

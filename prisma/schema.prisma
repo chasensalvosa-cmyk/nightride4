@@ -84,19 +84,20 @@ model SavedLocation {
 }
 
 model CommunityReport {
-  id                 String   @id @default(cuid())
+  id                 String    @id @default(cuid())
   userId             String
   title              String
   description        String
-  category           String // road_hazard | damaged_road | construction | road_closure | charging_station | riding_location | general_safety
+  category           String // road_hazard | damaged_road | construction | road_closure | charging_station | riding_location | general_safety | police_activity
   latitude           Float
   longitude          Float
   locationLabel      String?
-  status             String   @default("open") // open | resolved | closed
-  verificationStatus String   @default("unverified") // unverified | confirmed
-  hidden             Boolean  @default(false) // moderation: auto-hidden after abuse threshold
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  status             String    @default("open") // open | resolved | closed
+  verificationStatus String    @default("unverified") // unverified | confirmed
+  hidden             Boolean   @default(false) // moderation: auto-hidden after abuse threshold
+  expiresAt          DateTime? // transient sightings (police_activity) auto-expire
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
 
   user           Profile              @relation(fields: [userId], references: [id], onDelete: Cascade)
   comments       ReportComment[]
@@ -150,18 +151,23 @@ model AbuseFlag {
   @@map("abuse_flags")
 }
 
-// Verified public traffic camera inventory (documented public sources only).
-// Ships EMPTY: populated only from a configured official provider or a
-// reviewed import with source_url + last_verified_at. No invented points.
+// Verified public camera inventory (documented public sources only).
+// Populated from the configured official provider or the DeFlock / OpenStreetMap
+// ALPR import (scripts/sync-alpr-cameras.ts). No invented points.
 model PublicCameraLocation {
   id              String   @id @default(cuid())
+  externalKey     String   @unique // e.g. "osm:node/123" or provider id — idempotent syncs
   name            String
+  brand           String? // Flock Safety, Motorola Solutions, Genetec, …
   latitude        Float
   longitude       Float
-  cameraType      String   @default("traffic")
+  cameraType      String   @default("traffic") // traffic | alpr
   sourceUrl       String
+  sourceName      String   @default("") // DeFlock · OpenStreetMap, WSDOT, …
   lastVerifiedAt  DateTime @default(now())
 
+  @@index([latitude, longitude])
+  @@index([cameraType])
   @@map("public_camera_locations")
 }
 

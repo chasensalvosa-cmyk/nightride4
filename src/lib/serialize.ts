@@ -49,6 +49,7 @@ export function serializeReport(
     verificationStatus: r.verificationStatus as CommunityReport['verificationStatus'],
     createdAt: r.createdAt.toISOString(),
     updatedAt: r.updatedAt.toISOString(),
+    expiresAt: r.expiresAt ? r.expiresAt.toISOString() : null,
     confirmationCount: r._count?.confirmations ?? 0,
     commentCount: r._count?.comments ?? 0,
     ...(distanceMeters !== undefined ? { distanceMeters } : {}),
@@ -129,10 +130,12 @@ export function serializeCamera(c: DbCamera): PublicCameraLocation {
   return {
     id: c.id,
     name: c.name,
+    brand: c.brand,
     latitude: c.latitude,
     longitude: c.longitude,
     cameraType: c.cameraType,
     sourceUrl: c.sourceUrl,
+    sourceName: c.sourceName || null,
     lastVerifiedAt: c.lastVerifiedAt.toISOString(),
   }
 }

@@ -1,7 +1,11 @@
 // GET /api/external/cameras
-// Public traffic camera locations. Honesty-first: when no official provider
-// is configured and no verified inventory exists, the endpoint returns an
-// explicit not_configured state — coordinates are never invented.
+// Public camera locations. Sources, in priority order:
+//   1. Configured official provider (e.g. state DOT traveler API) — full list.
+//   2. Verified inventory in the database (DeFlock / OpenStreetMap ALPR sync
+//      or a staged municipal import) — filtered by the requested bounding box
+//      so the 145k-camera ALPR dataset stays cheap to serve.
+// Honesty-first: with no provider and an empty inventory the endpoint returns
+// an explicit not_configured state — coordinates are never invented.
 import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { fetchWithCache } from '@/lib/api-cache'
@@ -11,7 +15,17 @@ import {
 } from '@/lib/external/cameras'
 import { serializeCamera } from '@/lib/serialize'
 
-export async function GET() {
+const ALPR_ATTRIBUTION =
+  '© OpenStreetMap contributors (ODbL) · DeFlock (deflock.org)'
+
+export async function GET(req: Request) {
+  const url = new URL(req.url)
+  const minLat = Number.parseFloat(url.searchParams.get('minLat') ?? '')
+  const minLng = Number.parseFloat(url.searchParams.get('minLng') ?? '')
+  const maxLat = Number.parseFloat(url.searchParams.get('maxLat') ?? '')
+  const maxLng = Number.parseFloat(url.searchParams.get('maxLng') ?? '')
+  const hasBbox = [minLat, minLng, maxLat, maxLng].every(Number.isFinite)
+
   // 1) Configured official provider (e.g. state DOT traveler API).
   if (isCameraProviderConfigured()) {
     const result = await fetchWithCache({
@@ -25,6 +39,8 @@ export async function GET() {
       return NextResponse.json({
         data: result.data.cameras.map((c) => ({
           ...c,
+          brand: null,
+          sourceName: result.data!.sourceName,
           lastVerifiedAt: c.lastVerifiedAt,
         })),
         freshness: result.freshness,
@@ -44,18 +60,33 @@ export async function GET() {
     })
   }
 
-  // 2) Verified inventory staged in the database (source_url + verified date).
-  const staged = await db.publicCameraLocation.findMany({
-    orderBy: { name: 'asc' },
-    take: 500,
-  })
-  if (staged.length > 0) {
+  // 2) Verified inventory staged in the database (DeFlock/OSM ALPR sync).
+  //    Bounded to the requested map viewport; a hard cap keeps responses light
+  //    even over dense metro areas. An empty viewport result is a legitimate
+  //    "no cameras here" — only a never-synced inventory is unavailable.
+  const CAP = 750
+  const hasInventory = await db.publicCameraLocation.findFirst({ select: { id: true } })
+  if (hasInventory) {
+    const bboxFilter = hasBbox
+      ? { latitude: { gte: minLat, lte: maxLat }, longitude: { gte: minLng, lte: maxLng } }
+      : {}
+    const staged = await db.publicCameraLocation.findMany({
+      where: bboxFilter,
+      orderBy: { lastVerifiedAt: 'desc' },
+      take: CAP,
+    })
+    const newest = staged[0]?.lastVerifiedAt ?? new Date()
+    const alprCount = staged.filter((c) => c.cameraType === 'alpr').length
     return NextResponse.json({
       data: staged.map(serializeCamera),
       freshness: 'live',
       fetchedAt: new Date().toISOString(),
-      source: 'Verified public inventory',
-      attribution: 'Each camera links to its public source',
+      source: alprCount > 0 ? 'DeFlock · OpenStreetMap' : 'Verified public inventory',
+      attribution: alprCount > 0 ? ALPR_ATTRIBUTION : 'Each camera links to its public source',
+      syncedAt: newest.toISOString(),
+      note: hasBbox
+        ? undefined
+        : 'No bounding box supplied — showing most recently verified cameras only.',
     })
   }
 
@@ -66,10 +97,13 @@ export async function GET() {
     fetchedAt: null,
     source: 'Not configured',
     attribution: '',
-    note:
-      'No public traffic camera source is configured. Set TRAFFIC_CAMERA_API_URL ' +
-      '(and TRAFFIC_CAMERA_API_KEY) to an official municipal or state transportation ' +
-      'department camera API — for example the WSDOT Traveler Information API ' +
-      '(https://www.wsdot.wa.gov/traffic/api/). Camera positions are never estimated.',
+    note: hasBbox
+      ? 'No cameras synced for this area yet. Run `bun scripts/sync-alpr-cameras.ts` ' +
+        'to import the DeFlock / OpenStreetMap ALPR inventory, or set TRAFFIC_CAMERA_API_URL ' +
+        'to an official municipal camera API. Camera positions are never estimated.'
+      : 'No public camera source is configured. Run `bun scripts/sync-alpr-cameras.ts` ' +
+        '(DeFlock / OpenStreetMap ALPR inventory) or set TRAFFIC_CAMERA_API_URL to an ' +
+        'official municipal camera API — e.g. WSDOT (https://www.wsdot.wa.gov/traffic/api/). ' +
+        'Camera positions are never estimated.',
   })
 }

@@ -10,7 +10,11 @@ export const REPORT_CATEGORIES = [
   'charging_station',
   'riding_location',
   'general_safety',
+  'police_activity',
 ] as const
+
+/** How long community police-activity sightings stay visible before expiring. */
+export const POLICE_ACTIVITY_TTL_MS = 2 * 60 * 60 * 1000 // 2 hours
 
 export const SAVED_LOCATION_CATEGORIES = [
   'charging',

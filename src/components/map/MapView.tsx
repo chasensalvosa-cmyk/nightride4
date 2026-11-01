@@ -38,6 +38,7 @@ import type { CommunityReport, ReportCategory } from '@/types'
 const HAZARD_CATEGORIES: ReportCategory[] = ['road_hazard', 'damaged_road', 'construction', 'general_safety']
 const CLOSURE_CATEGORIES: ReportCategory[] = ['road_closure']
 const RIDING_CATEGORIES: ReportCategory[] = ['riding_location']
+const POLICE_CATEGORIES: ReportCategory[] = ['police_activity']
 
 function categoryIcon(category: ReportCategory): MapMarkerData['icon'] {
   switch (category) {
@@ -47,6 +48,7 @@ function categoryIcon(category: ReportCategory): MapMarkerData['icon'] {
     case 'road_closure': return 'closure'
     case 'charging_station': return 'charging'
     case 'riding_location': return 'riding'
+    case 'police_activity': return 'police'
     default: return 'safety'
   }
 }
@@ -80,13 +82,17 @@ export default function MapView() {
   const riders = useRealtimeStore((s) => s.riders)
 
   // ------------------------------------------------------------ deep links
+  // Waits for the live map instance: applying coordinates before the engine
+  // is ready silently no-ops (and the ref guard would then swallow the retry).
   const searchParams = useSearchParams()
   useEffect(() => {
     if (deepLinkApplied.current) return
-    deepLinkApplied.current = true
     const lat = Number.parseFloat(searchParams.get('lat') ?? '')
     const lng = Number.parseFloat(searchParams.get('lng') ?? '')
     const zoom = Number.parseFloat(searchParams.get('zoom') ?? '')
+    const layerParam = searchParams.get('layers')
+    if (!mapInstance && (Number.isFinite(lat) || layerParam)) return
+    deepLinkApplied.current = true
     if (Number.isFinite(lat) && Number.isFinite(lng)) {
       useMapStore.getState().setView({
         lat,
@@ -95,7 +101,6 @@ export default function MapView() {
       })
       mapInstance?.flyTo({ center: [lng, lat], zoom: Number.isFinite(zoom) ? zoom : view.zoom })
     }
-    const layerParam = searchParams.get('layers')
     if (layerParam) {
       for (const id of layerParam.split(',')) {
         if (id in layers) setLayer(id as keyof typeof layers, true)
@@ -113,7 +118,8 @@ export default function MapView() {
   }, [])
 
   // ------------------------------------------------------------ data layers
-  const anyReportLayer = layers.road_hazards || layers.road_closures || layers.riding_areas || layers.charging
+  const anyReportLayer =
+    layers.road_hazards || layers.road_closures || layers.riding_areas || layers.charging || layers.police_activity
 
   const reportsQuery = useQuery({
     queryKey: ['map-reports'],
@@ -148,9 +154,19 @@ export default function MapView() {
   })
 
   const camerasQuery = useQuery({
-    queryKey: ['cameras'],
-    queryFn: fetchCameras,
-    enabled: layers.cameras,
+    queryKey: ['cameras', bboxKey],
+    queryFn: () =>
+      fetchCameras(
+        bounds
+          ? {
+              minLat: bounds.minLat,
+              minLng: bounds.minLng,
+              maxLat: bounds.maxLat,
+              maxLng: bounds.maxLng,
+            }
+          : undefined,
+      ),
+    enabled: layers.cameras && !!bounds,
     staleTime: 5 * 60_000,
   })
 
@@ -202,15 +218,17 @@ export default function MapView() {
   const markers = useMemo<MapMarkerData[]>(() => {
     const list: MapMarkerData[] = []
 
-    if (layers.road_hazards || layers.road_closures || layers.riding_areas) {
+    if (layers.road_hazards || layers.road_closures || layers.riding_areas || layers.police_activity) {
       for (const r of reports) {
         const isHazard = HAZARD_CATEGORIES.includes(r.category)
         const isClosure = CLOSURE_CATEGORIES.includes(r.category)
         const isRiding = RIDING_CATEGORIES.includes(r.category)
+        const isPolice = POLICE_CATEGORIES.includes(r.category)
         const show =
           (isHazard && layers.road_hazards) ||
           (isClosure && layers.road_closures) ||
-          (isRiding && layers.riding_areas)
+          (isRiding && layers.riding_areas) ||
+          (isPolice && layers.police_activity)
         if (!show) continue
         list.push({
           id: `report-${r.id}`,
@@ -253,7 +271,7 @@ export default function MapView() {
           layer: 'cameras',
           lat: c.latitude,
           lng: c.longitude,
-          icon: 'camera',
+          icon: c.cameraType === 'alpr' ? 'alpr' : 'camera',
           label: c.name,
           selected: selectedMarkerId === `cam-${c.id}`,
           onClick: () => {
@@ -403,12 +421,13 @@ export default function MapView() {
       road_hazards: { count: reports.filter((r) => HAZARD_CATEGORIES.includes(r.category)).length },
       road_closures: { count: reports.filter((r) => CLOSURE_CATEGORIES.includes(r.category)).length },
       riding_areas: { count: reports.filter((r) => RIDING_CATEGORIES.includes(r.category)).length },
+      police_activity: { count: reports.filter((r) => POLICE_CATEGORIES.includes(r.category)).length },
       charging: { count: stations.length, loading: chargingQuery.isFetching },
     }
     if (layers.cameras) {
       out.cameras =
         camerasQuery.data?.freshness === 'unavailable'
-          ? { unavailable: 'No provider configured' }
+          ? { unavailable: 'No source synced' }
           : { count: cameras.length, loading: camerasQuery.isFetching }
     }
     if (layers.aviation) {

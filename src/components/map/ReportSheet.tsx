@@ -131,6 +131,12 @@ export function ReportSheet({
               </Select>
               <p className="text-[10px] leading-relaxed text-text-muted">
                 {REPORT_CATEGORY_META[category].description}
+                {category === 'police_activity' && (
+                  <span className="mt-1 block text-status-warning">
+                    Community sightings only — unverified, and they disappear automatically after
+                    2 hours. Never report to obstruct or evade; this is rider-safety awareness.
+                  </span>
+                )}
               </p>
             </div>
 

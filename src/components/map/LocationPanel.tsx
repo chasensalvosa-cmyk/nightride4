@@ -136,6 +136,9 @@ function ReportDetails({
         <Row label="Comments" value={`${report.commentCount}`} />
         <Row label="By" value={report.author?.username ?? 'Unknown'} />
         <Row label="Reported" value={<RelativeTime iso={report.createdAt} />} />
+        {report.expiresAt && (
+          <Row label="Expires" value={<RelativeTime iso={report.expiresAt} />} />
+        )}
       </div>
       <div className="flex flex-wrap gap-2">
         <Button asChild size="sm" variant="secondary">
@@ -179,16 +182,21 @@ function ChargingDetails({ station }: { station: ChargingStation }) {
 }
 
 function CameraDetails({ camera }: { camera: PublicCameraLocation }) {
+  const isAlpr = camera.cameraType === 'alpr'
   return (
     <div className="space-y-3">
       <h3 className="text-sm font-semibold leading-snug text-foreground">{camera.name}</h3>
       <div className="rounded-md border border-border bg-panel-2 px-2.5 py-1.5">
-        <Row label="Type" value={camera.cameraType} />
+        <Row label="Type" value={isAlpr ? 'License plate reader (ALPR)' : camera.cameraType} />
+        {camera.brand && <Row label="Brand" value={camera.brand} />}
         <Row label="Verified" value={<RelativeTime iso={camera.lastVerifiedAt} />} />
         <Row label="Coordinates" value={formatCoordinate(camera.latitude, 'lat')} />
+        {camera.sourceName && <Row label="Source" value={camera.sourceName} />}
       </div>
       <p className="text-[10px] leading-relaxed text-text-muted">
-        Documented public traffic camera. No live video is accessed — location record only.
+        {isAlpr
+          ? 'ALPR camera location from the DeFlock / OpenStreetMap open-data inventory — community-mapped, no live feed is accessed.'
+          : 'Documented public traffic camera. No live video is accessed — location record only.'}
       </p>
       <Button asChild size="sm" variant="secondary">
         <a href={camera.sourceUrl} target="_blank" rel="noreferrer">

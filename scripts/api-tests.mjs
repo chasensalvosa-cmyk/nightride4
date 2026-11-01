@@ -4,9 +4,12 @@
 //
 // Covers: auth (register/login/logout/me), rides (create/update/complete/
 // ownership isolation), community reports (CRUD, comments, confirmations,
-// verification threshold, moderation flags, filters), saved locations,
-// external providers (live data or explicit unavailable states), the API
-// status matrix, settings/export/delete, and a client-bundle secret scan.
+// verification threshold, moderation flags, filters, police-activity
+// auto-expiry), saved locations, external providers (live data or explicit
+// unavailable states, incl. the DeFlock/OSM ALPR inventory), the API status
+// matrix, settings/export/delete, and a client-bundle secret scan.
+
+import { PrismaClient } from '@prisma/client'
 
 const BASE = process.env.TEST_BASE_URL || 'http://localhost:3000'
 const results = []
@@ -211,6 +214,35 @@ async function main() {
   r = await anon.get('/api/community/reports?lat=47.61&lng=-122.34&sort=nearby&limit=5')
   check('nearby sort returns distances', r.json.reports?.every((x) => typeof x.distanceMeters === 'number' || x.distanceMeters === undefined))
 
+  // ---- police activity: transient community sightings (auto-expire) ----
+  r = await a.post('/api/community/reports', {
+    title: 'Patrol parked at the gas station',
+    description: 'Patrol car sitting in the lot, running plates. Community sighting.',
+    category: 'police_activity',
+    latitude: 47.615,
+    longitude: -122.345,
+    locationLabel: 'Pike Pl',
+  })
+  check('police activity report created by A', r.status === 201 && r.json.report?.category === 'police_activity', JSON.stringify(r.json).slice(0, 80))
+  const policeId = r.json.report?.id
+  const ttlMs = policeId ? new Date(r.json.report.expiresAt).getTime() - Date.now() : 0
+  check('police report auto-expires ≈2h from now', ttlMs > 100 * 60 * 1000 && ttlMs < 140 * 60 * 1000, `ttl=${Math.round(ttlMs / 60000)}min`)
+
+  r = await anon.get('/api/community/reports?category=police_activity&limit=10')
+  check('police report visible while fresh', r.json.reports?.some((x) => x.id === policeId))
+
+  // Expire it directly in the DB (simulates time passing) and verify honest
+  // filtering — stale enforcement positions must never linger on the map.
+  const prisma = new PrismaClient()
+  await prisma.communityReport.update({ where: { id: policeId }, data: { expiresAt: new Date(Date.now() - 60_000) } })
+  await prisma.$disconnect()
+  r = await anon.get('/api/community/reports?category=police_activity&limit=10')
+  check('expired police report filtered from feed', !r.json.reports?.some((x) => x.id === policeId))
+  r = await anon.get('/api/community/reports?limit=200')
+  check('expired police report filtered from unfiltered feed too', !r.json.reports?.some((x) => x.id === policeId))
+  r = await a.del(`/api/community/reports/${policeId}`)
+  check('author cleans up the expired police report', r.status === 200)
+
   // ------------------------------------------------------------ saved locations
   section('Saved locations')
   r = await anon.post('/api/locations', { name: 'X', latitude: 1, longitude: 1, category: 'custom' })
@@ -261,11 +293,32 @@ async function main() {
     const e = r.json.data[0]
     check('safety events carry source attribution', e.sourceName === 'NWS' && !!e.sourceUrl)
   }
-  r = await anon.get('/api/external/cameras')
+  r = await anon.get('/api/external/cameras?minLat=33.65&minLng=-84.55&maxLat=33.90&maxLng=-84.30')
   check(
-    'cameras: honest not-configured state (no invented markers)',
-    r.status === 200 && r.json.freshness === 'unavailable' && r.json.data.length === 0 && /TRAFFIC_CAMERA_API_URL/.test(r.json.note ?? ''),
-    r.json?.note?.slice(0, 60),
+    'cameras: DeFlock/OSM ALPR inventory served for the Atlanta bbox',
+    r.status === 200 && r.json.freshness === 'live' && (r.json.data?.length ?? 0) > 100,
+    `freshness=${r.json?.freshness} count=${r.json?.data?.length}`,
+  )
+  if (r.json?.data?.length > 0) {
+    const cam = r.json.data[0]
+    const flock = r.json.data.filter((c) => c.brand === 'Flock Safety').length
+    check(
+      'ALPR cameras have real coords, type, source attribution',
+      Number.isFinite(cam.latitude) && Number.isFinite(cam.longitude) &&
+        cam.cameraType === 'alpr' && /OpenStreetMap/.test(r.json.attribution ?? ''),
+      `attribution=${r.json?.attribution}`,
+    )
+    check('Flock Safety brand cameras present', flock > 0, `flock=${flock}/${r.json.data.length}`)
+    check(
+      'bbox respected — every camera inside the requested viewport',
+      r.json.data.every((c) => c.latitude >= 33.65 && c.latitude <= 33.9 && c.longitude >= -84.55 && c.longitude <= -84.3),
+    )
+  }
+  r = await anon.get('/api/external/cameras?minLat=0&minLng=-160&maxLat=5&maxLng=-150')
+  check(
+    'cameras: empty ocean bbox returns zero cameras (never invented)',
+    r.status === 200 && (r.json.data?.length ?? 0) === 0 && r.json.freshness === 'live',
+    `count=${r.json?.data?.length} freshness=${r.json?.freshness}`,
   )
   r = await anon.get('/api/external/geocode?q=Space%20Needle%20Seattle')
   check(
@@ -287,7 +340,14 @@ async function main() {
   const mapbox = providers.find((p) => p.key === 'mapbox')
   check('Mapbox honestly reported (missing → fallback active)', mapbox?.status === 'missing' || mapbox?.status === 'connected', mapbox?.status)
   const camerasStatus = providers.find((p) => p.key === 'cameras')
-  check('cameras honestly not configured', camerasStatus?.status === 'missing', camerasStatus?.status)
+  check(
+    'cameras: ALPR inventory connected (or honest missing state)',
+    camerasStatus?.status === 'connected' || camerasStatus?.status === 'missing',
+    camerasStatus?.status,
+  )
+  if (camerasStatus?.status === 'connected') {
+    check('camera status cites the DeFlock/OSM source', /DeFlock/.test(camerasStatus.detail ?? ''))
+  }
   const rt = providers.find((p) => p.key === 'realtime')
   check('realtime service connected', rt?.status === 'connected', rt?.status)
   const db = providers.find((p) => p.key === 'database')

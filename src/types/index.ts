@@ -59,6 +59,7 @@ export type ReportCategory =
   | 'charging_station'
   | 'riding_location'
   | 'general_safety'
+  | 'police_activity'
 
 export type ReportStatus = 'open' | 'resolved' | 'closed'
 export type VerificationStatus = 'unverified' | 'confirmed' | 'disputed'
@@ -77,6 +78,8 @@ export interface CommunityReport {
   verificationStatus: VerificationStatus
   createdAt: string
   updatedAt: string
+  /** transient sightings (police activity) auto-expire; null = permanent */
+  expiresAt?: string | null
   confirmationCount: number
   commentCount: number
   /** filled by the API when the client supplies a reference position */
@@ -115,10 +118,12 @@ export interface SavedLocation {
 export interface PublicCameraLocation {
   id: string
   name: string
+  brand: string | null
   latitude: number
   longitude: number
   cameraType: string
   sourceUrl: string
+  sourceName: string | null
   lastVerifiedAt: string
 }
 
@@ -265,6 +270,7 @@ export type MapLayerId =
   | 'charging'
   | 'riding_areas'
   | 'aviation'
+  | 'police_activity'
 
 export interface MapViewState {
   lat: number

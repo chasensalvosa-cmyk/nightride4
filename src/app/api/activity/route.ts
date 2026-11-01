@@ -22,7 +22,11 @@ export async function GET(req: Request) {
 
   const [reports, safetyEvents, aviation] = await Promise.all([
     db.communityReport.findMany({
-      where: { hidden: false },
+      where: {
+        hidden: false,
+        // Transient sightings (police activity) disappear once expired.
+        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+      },
       include: { user: { select: { username: true, avatarUrl: true } } },
       orderBy: { createdAt: 'desc' },
       take: 80,
