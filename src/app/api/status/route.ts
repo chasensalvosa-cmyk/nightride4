@@ -53,8 +53,33 @@ async function pingUrl(url: string, init?: RequestInit): Promise<boolean> {
   }
 }
 
+/** Status checks run in parallel, but no single provider may hold the whole
+ *  response hostage: every check is capped, so /api/status always answers in
+ *  ~STATUS_CAP_MS regardless of provider latency (the Overpass mirror chain
+ *  alone can stack 3 x 20 s timeouts without this). */
+const STATUS_CAP_MS = 8000
+
+function capped(entry: Promise<ApiStatusEntry>): Promise<ApiStatusEntry> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const fallback = new Promise<ApiStatusEntry>((resolve) => {
+    timer = setTimeout(
+      () =>
+        resolve({
+          key: 'timeout',
+          provider: '—',
+          label: '—',
+          status: 'unreachable',
+          detail: `Health check exceeded ${STATUS_CAP_MS} ms — provider too slow, reported unreachable.`,
+          lastChecked: new Date().toISOString(),
+        }),
+      STATUS_CAP_MS,
+    )
+  })
+  return Promise.race([entry, fallback]).finally(() => clearTimeout(timer))
+}
+
 export async function GET() {
-  const checks = await Promise.all([
+  const entries = [
     check(
       'database',
       'Local database (Prisma SQLite)',
@@ -274,7 +299,8 @@ export async function GET() {
           : { status: 'unreachable', detail: 'Realtime service not responding (mini-service on :3003).' }
       },
     ),
-  ])
+  ]
+  const checks = await Promise.all(entries.map(capped))
 
   const response: ApiStatusResponse = {
     checkedAt: new Date().toISOString(),
