@@ -95,6 +95,7 @@ export default function MapView() {
   const [activeRouteIdx, setActiveRouteIdx] = useState(0)
   const [calibrating, setCalibrating] = useState(false)
   const [calDialogOpen, setCalDialogOpen] = useState(false)
+  const [riderAddr, setRiderAddr] = useState<{ label: string; detail: string } | null>(null)
   const deepLinkApplied = useRef(false)
 
   // GPS: auto-start on mount — the browser asks for permission once, then the
@@ -104,6 +105,31 @@ export default function MapView() {
   const setSharingPresence = useRealtimeStore((s) => s.setSharingPresence)
   const realtimeConnected = useRealtimeStore((s) => s.connected)
   const riders = useRealtimeStore((s) => s.riders)
+
+  // Live street address of the rider's effective (calibration-corrected)
+  // position — reverse-geocoded, debounced, updates as the dot follows them.
+  useEffect(() => {
+    if (!geo.coords) {
+      setRiderAddr(null)
+      return
+    }
+    const { lat, lng } = geo.coords
+    let cancelled = false
+    const t = setTimeout(() => {
+      fetch(`/api/external/geocode?lat=${lat.toFixed(6)}&lng=${lng.toFixed(6)}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((body) => {
+          if (!cancelled && body?.data?.label) {
+            setRiderAddr({ label: body.data.label, detail: body.data.detail ?? '' })
+          }
+        })
+        .catch(() => undefined)
+    }, 900)
+    return () => {
+      cancelled = true
+      clearTimeout(t)
+    }
+  }, [geo.coords?.lat, geo.coords?.lng])
 
   // ------------------------------------------------------------ deep links
   // Waits for the live map instance: applying coordinates before the engine
@@ -516,6 +542,11 @@ export default function MapView() {
             description:
               'Wi-Fi/network positioning. The red circle shows the real uncertainty — for street-level GPS precision use your phone, or calibrate with the target control.',
           })
+        } else if (acc > 25) {
+          toast.info(`Centered — ±${acc} m`, {
+            description:
+              'Close, but not exactly on you? Tap the target control (Fix my location), then tap your spot on the map — the dot, your address and routes snap to it.',
+          })
         } else {
           toast.success(`Centered — ±${acc} m GPS accuracy`)
         }
@@ -624,6 +655,9 @@ export default function MapView() {
             setCalibrating(false)
             const cal = geo.calibrateTo(lat, lng)
             if (cal) {
+              // Keep the position stream alive — the dot now follows the
+              // rider from the corrected spot ("track me" behaviour).
+              geo.start()
               const shiftM = haversineMeters(
                 cal.anchorLat,
                 cal.anchorLng,
@@ -632,8 +666,21 @@ export default function MapView() {
               )
               toast.success(`Location calibrated — moved ${formatDistance(shiftM)}`, {
                 description:
-                  'The map dot, nearby search, routing and presence now start from this spot. Tap the target control again to adjust or clear it.',
+                  'The map dot, your address, nearby search, routing and presence now start from this spot. Tap the target control again to adjust or clear it.',
               })
+              // Show the corrected street address for the spot the rider
+              // just asserted ("what your address is now read as").
+              fetch(`/api/external/geocode?lat=${lat.toFixed(6)}&lng=${lng.toFixed(6)}`)
+                .then((r) => (r.ok ? r.json() : null))
+                .then((body) => {
+                  const label = body?.data?.label
+                  if (label) {
+                    toast.info(`Your address: ${label}`, {
+                      description: body?.data?.detail ?? undefined,
+                    })
+                  }
+                })
+                .catch(() => undefined)
             } else {
               toast.error('Calibration failed', {
                 description: 'No live position fix to correct — tap recenter first, then try again.',
@@ -720,6 +767,26 @@ export default function MapView() {
               </p>
             )}
           </div>
+
+          {/* your live street address (effective position) */}
+          {geo.coords && (
+            <div className="pointer-events-auto w-full rounded-lg border border-border bg-panel/95 px-3 py-2 backdrop-blur-sm">
+              <div className="flex items-center gap-2">
+                <LocateFixed
+                  className={`h-3.5 w-3.5 shrink-0 ${geo.coords.calibrated ? 'text-primary' : 'text-text-muted'}`}
+                  aria-hidden
+                />
+                <span className="truncate text-xs text-text-secondary" title={riderAddr?.detail}>
+                  {riderAddr
+                    ? `${riderAddr.label}${riderAddr.detail ? ` · ${riderAddr.detail.split(',')[0]}` : ''}`
+                    : 'Resolving your address…'}
+                </span>
+              </div>
+              <p className="mt-1 text-[10px] uppercase tracking-wider text-text-muted">
+                {geo.coords.calibrated ? 'Your address · calibrated' : 'Your address'}
+              </p>
+            </div>
+          )}
 
           {/* fastest-route options (all viewports) */}
           {routeDestination && (

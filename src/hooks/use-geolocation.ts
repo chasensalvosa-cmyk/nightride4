@@ -65,8 +65,11 @@ const CALIBRATION_EVENT = 'nightride:geo-calibration-changed'
  *  rider moved) and must NOT be shifted. */
 const CALIBRATION_ANCHOR_RADIUS_M = 2000
 /** Fixes at least this accurate are trusted GPS — calibration is bypassed so
- *  a phone's real GPS fix is never offset by a desktop-era correction. */
-const CALIBRATION_BYPASS_ACCURACY_M = 50
+ *  a phone's real GPS fix is never offset by an older correction. 20 m, not
+ *  50: phone Wi-Fi fixes routinely report 30-50 m ("close, but a few houses
+ *  off my home") — those MUST stay correctable, while a true GPS fix with
+ *  enableHighAccuracy is essentially always under 20 m. */
+const CALIBRATION_BYPASS_ACCURACY_M = 20
 /** Wi-Fi geolocation databases get corrected over time; drop stale records. */
 const CALIBRATION_TTL_MS = 30 * 24 * 60 * 60 * 1000
 
