@@ -69,8 +69,9 @@ class Client {
 const rand = () => Math.random().toString(36).slice(2, 10)
 const USER_A = `testa${rand()}`
 const USER_B = `testb${rand()}`
+let USER_D = null // registered mid-run (verification test); captured for teardown
 
-async function main() {
+async function runTests() {
   console.log(`NIGHTRIDE API tests → ${BASE}`)
 
   // ------------------------------------------------------------ auth
@@ -222,7 +223,8 @@ async function main() {
   check('1 confirmation is still unverified', r.json.report?.verificationStatus === 'unverified')
 
   const d = new Client()
-  r = await d.post('/api/auth/register', { username: `testd${rand()}`, password: 'testpass123' })
+  USER_D = `testd${rand()}`
+  r = await d.post('/api/auth/register', { username: USER_D, password: 'testpass123' })
   r = await d.post(`/api/community/reports/${reportId}/confirmations`)
   check('second distinct confirmation → verified', r.status === 200 && r.json.confirmationCount === 2)
   r = await a.get(`/api/community/reports/${reportId}`)
@@ -501,10 +503,36 @@ async function main() {
 
   // ------------------------------------------------------------ summary
   console.log(`\n${'='.repeat(60)}\nRESULTS: ${results.length - failed}/${results.length} passed${failed ? `, ${failed} FAILED` : ''}\n${'='.repeat(60)}`)
-  if (failed > 0) process.exit(1)
+  if (failed > 0) process.exitCode = 1
+}
+
+// Remove every account this run created (reports, comments, confirmations,
+// flags, rides, sessions and settings cascade with the profile) so automated
+// test data never lingers in the dev database and never shows up in the app
+// as fake community content.
+async function teardown() {
+  try {
+    const prisma = new PrismaClient()
+    for (const username of [USER_A, USER_B, USER_D].filter(Boolean)) {
+      await prisma.profile.deleteMany({ where: { username } })
+    }
+    await prisma.$disconnect()
+    console.log('\n■ Teardown — test accounts removed, no residue left in the dev DB')
+  } catch (err) {
+    console.error('Teardown failed (run scripts/clean-test-data.py to clean up):', err)
+    process.exitCode = 1
+  }
+}
+
+async function main() {
+  try {
+    await runTests()
+  } finally {
+    await teardown() // runs even if a check crashes the suite
+  }
 }
 
 main().catch((err) => {
   console.error('Test suite crashed:', err)
-  process.exit(1)
+  process.exitCode = 1
 })
