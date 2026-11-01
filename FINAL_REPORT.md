@@ -111,26 +111,6 @@ Supabase key stays server-side only.
    sandbox `overpass-api.de`/`kumi` are network-blocked and `maps.mail.ru` is intermittent
    (bursts of 504 s, ~20 s when healthy) — in deployed environments the canonical mirror is fast.
    The layer degrades honestly to "unavailable" when all mirrors fail (never to fake stations).
-10. **Photon (komoot) IP sensitivity** — the public Photon instance rate-limit-blocks bursty IPs
-   (the sandbox IP was blocked after a ~70-request fan-out test). Search and the category chips
-   therefore treat Photon as best-effort: the Nominatim path (apostrophe-variant brand pooling +
-   category words) fully carries both features when Photon is unreachable. Both engines degrade
-   independently by design.
-11. **MapLibre expression rules (lesson from the accuracy-circle bug)** — `zoom` may only appear
-   inside `interpolate`/`step` (otherwise `addLayer` **silently** drops the layer, no error), and
-   `interpolate` **clamps** outside its stop range (stops must span zoom 0–22 for a full-range
-   camera function). The true-scale circle uses an exponential-base-2 interpolation between two
-   stops 2²² apart, which reproduces `accuracy · 2^zoom / (78271.484 · cos(lat))` exactly.
-10. **Photon (komoot) IP sensitivity** — the public Photon instance rate-limit-blocks bursty IPs
-   (the sandbox IP was blocked after a ~70-request fan-out test). Search and the category chips
-   therefore treat Photon as best-effort: the Nominatim path (apostrophe-variant brand pooling +
-   category words) fully carries both features when Photon is unreachable. Both engines degrade
-   independently by design.
-11. **MapLibre expression rules (lesson from the accuracy-circle bug)** — `zoom` may only appear
-   inside `interpolate`/`step` (otherwise `addLayer` **silently** drops the layer, no error), and
-   `interpolate` **clamps** outside its stop range (stops must span zoom 0–22 for a full-range
-   camera function). The true-scale circle uses an exponential-base-2 interpolation between two
-   stops 2²² apart, which reproduces `accuracy · 2^zoom / (78271.484 · cos(lat))` exactly.
 5. **Camera images** are never streamed — only documented locations + source links (privacy policy
    by design).
 6. Avatars are URL-based (no file upload storage in this deployment).
@@ -148,6 +128,16 @@ Supabase key stays server-side only.
 9. **Police-activity sightings are unverified community reports** — they auto-expire after 2 h and
    are filtered server-side once expired, but accuracy depends on the reporting rider. No live
    law-enforcement position feed exists anywhere (by design — see API_RESEARCH.md §4).
+10. **Photon (komoot) IP sensitivity** — the public Photon instance rate-limit-blocks bursty IPs
+   (the sandbox IP was blocked after a ~70-request fan-out test). Search and the category chips
+   therefore treat Photon as best-effort: the Nominatim path (apostrophe-variant brand pooling +
+   category words) fully carries both features when Photon is unreachable. Both engines degrade
+   independently by design.
+11. **MapLibre expression rules (lesson from the accuracy-circle bug)** — `zoom` may only appear
+   inside `interpolate`/`step` (otherwise `addLayer` **silently** drops the layer, no error), and
+   `interpolate` **clamps** outside its stop range (stops must span zoom 0–22 for a full-range
+   camera function). The true-scale circle uses an exponential-base-2 interpolation between two
+   stops 2²² apart, which reproduces `accuracy · 2^zoom / (78271.484 · cos(lat))` exactly.
 
 ## 8. How to start
 
