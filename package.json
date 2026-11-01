@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev -p 3000 2>&1 | tee dev.log",
-    "build": "next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/",
+    "build": "node scripts/build.mjs",
+    "postinstall": "prisma generate",
     "start": "NODE_ENV=production bun .next/standalone/server.js 2>&1 | tee server.log",
     "lint": "eslint .",
     "db:push": "prisma db push --accept-data-loss",
@@ -83,6 +84,11 @@
     "zod": "^4.0.2",
     "zustand": "^5.0.6"
   },
+  "trustedDependencies": [
+    "@prisma/client",
+    "prisma",
+    "sharp"
+  ],
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/react": "^19",

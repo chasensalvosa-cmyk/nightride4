@@ -1,0 +1,221 @@
+// NIGHTRIDE — Prisma schema (hosted PostgreSQL: Supabase / Neon / RDS …).
+//
+// Same models as schema.prisma (the local SQLite dev schema) with two changes:
+//   • provider = "postgresql"
+//   • idiomatic snake_case column names via @map
+//
+// scripts/build.mjs picks this file automatically when DATABASE_URL is a
+// postgres:// / postgresql:// URL (Vercel, Cloudflare, any host) and falls
+// back to schema.prisma for local file: SQLite development.
+//
+// Tables are created by supabase/migrations/002_app_auth_init.sql — run it
+// once in your Postgres (Supabase SQL editor or psql).
+//
+// ⚠ Keep BOTH schema files in sync when you change models, and mirror the
+//   change in 002_app_auth_init.sql.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Profile {
+  id           String   @id
+  username     String   @unique
+  passwordHash String   @map("password_hash")
+  avatarUrl    String?  @map("avatar_url")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  sessions       Session[]
+  rides          Ride[]
+  savedLocations SavedLocation[]
+  reports        CommunityReport[]
+  comments       ReportComment[]
+  confirmations  ReportConfirmation[]
+  flags          AbuseFlag[]
+  settings       UserSettings?
+
+  @@map("profiles")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String   @map("user_id")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user Profile @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model Ride {
+  id              String    @id @default(cuid())
+  userId          String    @map("user_id")
+  title           String?
+  startedAt       DateTime  @map("started_at")
+  endedAt         DateTime? @map("ended_at")
+  durationSeconds Int       @default(0) @map("duration_seconds")
+  distanceMeters  Float     @default(0) @map("distance_meters")
+  averageSpeed    Float     @default(0) @map("average_speed")
+  maximumSpeed    Float     @default(0) @map("maximum_speed")
+  routeData       String    @default("[]") @map("route_data")
+  status          String    @default("active")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  user Profile @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@index([userId, startedAt])
+  @@map("rides")
+}
+
+model SavedLocation {
+  id          String   @id @default(cuid())
+  userId      String   @map("user_id")
+  name        String
+  description String?
+  latitude    Float
+  longitude   Float
+  category    String   @default("custom")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  user Profile @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("saved_locations")
+}
+
+model CommunityReport {
+  id                 String    @id @default(cuid())
+  userId             String    @map("user_id")
+  title              String
+  description        String
+  category           String
+  latitude           Float
+  longitude          Float
+  locationLabel      String?   @map("location_label")
+  status             String    @default("open")
+  verificationStatus String    @default("unverified") @map("verification_status")
+  hidden             Boolean   @default(false)
+  expiresAt          DateTime? @map("expires_at")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  user           Profile              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  comments       ReportComment[]
+  confirmations  ReportConfirmation[]
+
+  @@index([category, status, createdAt])
+  @@index([latitude, longitude])
+  @@map("community_reports")
+}
+
+model ReportComment {
+  id        String   @id @default(cuid())
+  reportId  String   @map("report_id")
+  userId    String   @map("user_id")
+  content   String
+  hidden    Boolean  @default(false)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  report CommunityReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  user   Profile         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([reportId, createdAt])
+  @@map("report_comments")
+}
+
+model ReportConfirmation {
+  id        String   @id @default(cuid())
+  reportId  String   @map("report_id")
+  userId    String   @map("user_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  report CommunityReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  user   Profile         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([reportId, userId])
+  @@map("report_confirmations")
+}
+
+model AbuseFlag {
+  id        String   @id @default(cuid())
+  itemType  String   @map("item_type")
+  itemId    String   @map("item_id")
+  userId    String   @map("user_id")
+  reason    String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user Profile @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([itemType, itemId, userId])
+  @@index([itemType, itemId])
+  @@map("abuse_flags")
+}
+
+// Verified public camera inventory (documented public sources only).
+model PublicCameraLocation {
+  id              String   @id @default(cuid())
+  externalKey     String   @unique @map("external_key")
+  name            String
+  brand           String?
+  latitude        Float
+  longitude       Float
+  cameraType      String   @default("traffic") @map("camera_type")
+  sourceUrl       String   @map("source_url")
+  sourceName      String   @default("") @map("source_name")
+  lastVerifiedAt  DateTime @default(now()) @map("last_verified_at")
+
+  @@index([latitude, longitude])
+  @@index([cameraType])
+  @@map("public_camera_locations")
+}
+
+// Official public safety events (e.g. NWS active alerts synced server-side).
+model PublicSafetyEvent {
+  id          String   @id @default(cuid())
+  externalId  String   @unique @map("external_id")
+  title       String
+  description String
+  category    String
+  severity    String?
+  latitude    Float?
+  longitude   Float?
+  areaDesc    String?  @map("area_desc")
+  sourceUrl   String   @map("source_url")
+  sourceName  String   @default("NWS") @map("source_name")
+  occurredAt  DateTime @map("occurred_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@index([occurredAt])
+  @@map("public_safety_events")
+}
+
+model UserSettings {
+  userId             String  @id @map("user_id")
+  // privacy
+  shareRidePresence  Boolean @default(false) @map("share_ride_presence")
+  publicProfile      Boolean @default(true) @map("public_profile")
+  // notifications
+  notifyNearbyReports Boolean @default(true) @map("notify_nearby_reports")
+  notifySafetyAlerts  Boolean @default(true) @map("notify_safety_alerts")
+  notifyReportReplies Boolean @default(true) @map("notify_report_replies")
+  notifyRideSummaries Boolean @default(true) @map("notify_ride_summaries")
+  // map
+  defaultMapStyle     String  @default("auto") @map("default_map_style")
+  showLayerLabels     Boolean @default(true) @map("show_layer_labels")
+  keepMapCenterState  Boolean @default(true) @map("keep_map_center_state")
+
+  user Profile @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_settings")
+}

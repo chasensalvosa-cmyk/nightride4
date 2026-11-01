@@ -30,8 +30,12 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
+# env files (real secrets never committed; the example file is)
 .env*
+!.env.example
+
+# local SQLite database (created by `npm run db:push`, contains password hashes)
+db/
 
 # vercel
 .vercel
