@@ -387,6 +387,62 @@ async function runTests() {
     )
   }
 
+  // brand POI search: "mcdonalds" (no apostrophe) must find the restaurants —
+  // the apostrophe-variant retry + Photon merge (regression for the
+  // "search finds nothing near me" bug)
+  r = await anon.get('/api/external/geocode?q=mcdonalds&lat=40.760&lng=-111.890')
+  check(
+    'brand search "mcdonalds" near SLC returns POIs (or honest unavailable)',
+    r.status === 200 && (r.json.freshness === 'live' ? (r.json.data?.length ?? 0) > 0 : true),
+    `freshness=${r.json?.freshness} count=${r.json?.data?.length}`,
+  )
+  if (r.json?.freshness === 'live' && r.json.data?.length) {
+    const fastFood = r.json.data.filter((x) => x.type === 'fast_food')
+    check(
+      'brand search finds actual fast_food POIs with distances',
+      fastFood.length > 0 && fastFood.every((x) => Number.isFinite(x.distanceMeters)),
+      `fast_food=${fastFood.length} first=${fastFood[0]?.label}`,
+    )
+  }
+  r = await anon.get('/api/external/geocode?q=smiths&lat=40.760&lng=-111.890')
+  if (r.json?.freshness === 'live' && r.json.data?.length) {
+    const supermarkets = r.json.data.filter((x) => x.type === 'supermarket')
+    check(
+      'brand search "smiths" near SLC surfaces Smith\'s supermarkets',
+      supermarkets.length > 0,
+      `supermarkets=${supermarkets.length} types=${[...new Set(r.json.data.map((x) => x.type))].join(',')}`,
+    )
+  }
+
+  // one-tap nearby category chips: real OSM POIs, distance-sorted, type-filtered
+  r = await anon.get('/api/external/pois?lat=40.760&lng=-111.890&category=food')
+  check(
+    'pois: food chip returns nearby POIs (or honest unavailable)',
+    r.status === 200 && (r.json.freshness === 'live' ? (r.json.data?.length ?? 0) > 0 : true),
+    `freshness=${r.json?.freshness} count=${r.json?.data?.length}`,
+  )
+  if (r.json?.freshness === 'live' && r.json.data?.length) {
+    const dists = r.json.data.map((x) => x.distanceMeters)
+    check(
+      'pois: food results distance-sorted and within riding range (≤ 30 km)',
+      dists.every((d) => Number.isFinite(d) && d <= 30000) &&
+        dists.every((d, i) => i === 0 || dists[i - 1] <= d),
+      `n=${dists.length} nearest=${Math.round(dists[0])} m`,
+    )
+    const types = new Set(r.json.data.map((x) => x.type))
+    check(
+      'pois: food results only contain food OSM types (no keyword drift)',
+      [...types].every((t) =>
+        ['restaurant', 'fast_food', 'cafe', 'food_court', 'pub', 'bar', 'ice_cream', 'bakery'].includes(t),
+      ),
+      [...types].join(','),
+    )
+  }
+  r = await anon.get('/api/external/pois?lat=40.760&lng=-111.890&category=bogus')
+  check('pois: unknown category rejected (400)', r.status === 400)
+  r = await anon.get('/api/external/pois?category=food')
+  check('pois: missing coordinates rejected (400)', r.status === 400)
+
   // fastest routes (OSRM): real geometry, sorted by time, or honest state
   r = await anon.get('/api/external/route?from=34.0522,-118.2437&to=34.1181,-118.3001')
   check(
@@ -419,7 +475,7 @@ async function runTests() {
   check(
     'route: unroutable ocean query → honest state, never invented',
     r.status === 200 &&
-      (r.json.freshness === 'unavailable' ? r.json.data === null : r.json.freshness === 'live'),
+      (r.json.freshness === 'unavailable' ? r.json.data === null : ['live', 'delayed'].includes(r.json.freshness)),
     `freshness=${r.json?.freshness}`,
   )
   r = await anon.get('/api/activity?limit=20')

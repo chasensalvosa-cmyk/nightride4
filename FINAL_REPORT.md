@@ -13,8 +13,9 @@
 | **8 routes** — /dashboard /map /community /rides /saved /activity /settings /profile, each with its own page component + /auth/login + /auth/register; `/` redirects to /dashboard | ✅ | Browser-verified: every route renders, navigation works |
 | **Dashboard** — welcome header, rider status (account/GPS/ride/realtime/providers), quick map, recent ride, nearby reports, road condition alerts, public safety announcements (NWS), saved locations | ✅ | Browser-verified |
 | **Live map** — MapLibre GL dark map (OpenFreeMap dark vector, keyless; Esri World Dark Gray keyless raster fallback; Mapbox dark-v11 when a token exists), search (Nominatim, debounced), recenter + zoom controls, location details panel with reverse geocoding, report submission, loading states, API status chip, legend | ✅ | Browser-verified: tiles render (pixel-checked), search flies to results, controls work |
-| **Own-position red dot (auto GPS)** — geolocation auto-starts with the map (browser permission prompt once); the rider's position renders as a red dot with accuracy halo, follows live, and the view snaps to it on the first fix (URL deep links win); the dot is applied even if the fix lands before the engine finishes booting | ✅ | Code-path verified; honest denied/unavailable states unchanged |
-| **Location-biased search** — with a GPS fix the search is boxed to ±35 km around the rider (`viewbox`+`bounded`, widening fallback), results sorted by real distance and badged "x km away" | ✅ | Live test: `?q=coffee&lat=34.0522&lng=-118.2437` → finite ascending distances, nearest ≈ 1 km |
+| **Own-position red dot (auto GPS)** — geolocation auto-starts with the map (browser permission prompt once, fresh fixes only — `maximumAge: 0`); the rider's position renders as a red dot **with a true-scale accuracy circle** (radius = the GPS `accuracy` value in meters, scaling with zoom — a Wi-Fi fix shows a wide honest circle, a GPS fix a tight one), follows live and refines as GPS converges, and the view snaps to it on the first fix (URL deep links win); the dot is applied even if the fix lands before the engine finishes booting; **GPS ±X m readout** in the status row and honest guidance toast on poor (>150 m Wi-Fi/network) fixes | ✅ | Browser-verified with simulated fixes: ±35 m → 20 px circle at zoom 14, ±1400 m → 194 px radius at zoom 13 (measured = expected within 1 px); dot title/aria carry ±m |
+| **Location-biased brand search** — with a GPS fix the search is boxed to ±35 km around the rider (`viewbox`+`bounded`, widening fallback), **Nominatim (addresses/streets) merged with Photon (brand POIs)** with automatic apostrophe-variant pooling ("mcdonalds" → also queries "McDonald's", "smiths" → "Smith's"), deduped by proximity, sorted by real distance and badged "x km away"; each engine degrades independently | ✅ | Live test: `?q=smiths&lat=40.76&lng=-111.89` → Smith's supermarkets 1.2–4.5 km (Nominatim-only path); `?q=mcdonalds` → McDonald's fast_food POIs with distances |
+| **One-tap nearby category chips** — Food · Coffee · Groceries · Fuel · ATM · Hotel buttons under the search box (GPS-gated) browse real OSM POIs near the rider via `/api/external/pois` (Nominatim category words merged with a Photon brand-term fan-out, OSM-type-filtered against keyword drift, ≤30 km riding range, distance-sorted, 6 h cache; empty results never cached) | ✅ | Live test: Food chip near SLC → BonFire Grill 626 m, Mar Muntanya 737 m…; browser E2E chip → select → fastest route |
 | **Fastest routes (navigation)** — choosing a destination (search result or "Route here" on any point) plans routes from the rider's live position via OSRM (car profile, `alternatives=2`): fastest highlighted (bright line + casing) with up to 2 dashed alternatives, switchable in the route panel (ETA + distance), camera fits once per destination/choice, live reroute on >≈110 m origin movement; honest "Routing unavailable" on outage/`NoRoute` — geometry never invented | ✅ | Live test + API suite; attribution "Routing © OpenStreetMap contributors, ODbL — OSRM" |
 | **8 independent map layers** — Rider Locations (consent presence), Cameras & ALPR (**DeFlock/OSM inventory — 145k ALPR cameras, 116k Flock Safety — live**), Road Hazards, Road Closures, Charging Stations (OSM/Overpass), Legal Riding Areas, Public Aviation Awareness (OpenSky), Police Activity (community sightings, 2 h auto-expiry) — each independently toggleable, honest empty/unavailable states, **no invented coordinates** | ✅ | Browser-verified: Atlanta viewport renders 246 ALPR markers; toggles persist; aviation rate-limit state shown |
 | **Community** — submit / filter (8 categories incl. police activity, status, newest/nearest) / view reports; comments; confirmations (2 distinct → verified); resolve/reopen (community), close/delete (author); abuse flags with 3-flag auto-hide; **police sightings auto-expire after 2 h** (stale enforcement positions are filtered server-side) | ✅ | API suite + browser E2E: expiry lifecycle tested (create → visible → expired → filtered) |
@@ -103,9 +104,33 @@ Supabase key stays server-side only.
    page light; full route replay shows in the ride detail dialog.
 3. **Comment "did I already confirm" state** is not returned by the API; the confirm action is an
    idempotent upsert (duplicate confirms don't double count).
-4. **Overpass mirror reachability** varies by network: primary mirror `overpass.osm.ch` verified
-   from this sandbox; `overpass-api.de` is blocked at network level here (automatic fallback chain
-   implemented).
+4. **Overpass mirror reachability & the regional-extract trap (2026-11 fix)** — `overpass.osm.ch`
+   turned out to be a **Switzerland-only extract**: it answers HTTP 200 with `0 elements` for any
+   query outside CH, which silently emptied the charging layer worldwide. It was removed; the chain
+   is now global mirrors only (`overpass-api.de` → `maps.mail.ru` → `kumi.systems`). From this
+   sandbox `overpass-api.de`/`kumi` are network-blocked and `maps.mail.ru` is intermittent
+   (bursts of 504 s, ~20 s when healthy) — in deployed environments the canonical mirror is fast.
+   The layer degrades honestly to "unavailable" when all mirrors fail (never to fake stations).
+10. **Photon (komoot) IP sensitivity** — the public Photon instance rate-limit-blocks bursty IPs
+   (the sandbox IP was blocked after a ~70-request fan-out test). Search and the category chips
+   therefore treat Photon as best-effort: the Nominatim path (apostrophe-variant brand pooling +
+   category words) fully carries both features when Photon is unreachable. Both engines degrade
+   independently by design.
+11. **MapLibre expression rules (lesson from the accuracy-circle bug)** — `zoom` may only appear
+   inside `interpolate`/`step` (otherwise `addLayer` **silently** drops the layer, no error), and
+   `interpolate` **clamps** outside its stop range (stops must span zoom 0–22 for a full-range
+   camera function). The true-scale circle uses an exponential-base-2 interpolation between two
+   stops 2²² apart, which reproduces `accuracy · 2^zoom / (78271.484 · cos(lat))` exactly.
+10. **Photon (komoot) IP sensitivity** — the public Photon instance rate-limit-blocks bursty IPs
+   (the sandbox IP was blocked after a ~70-request fan-out test). Search and the category chips
+   therefore treat Photon as best-effort: the Nominatim path (apostrophe-variant brand pooling +
+   category words) fully carries both features when Photon is unreachable. Both engines degrade
+   independently by design.
+11. **MapLibre expression rules (lesson from the accuracy-circle bug)** — `zoom` may only appear
+   inside `interpolate`/`step` (otherwise `addLayer` **silently** drops the layer, no error), and
+   `interpolate` **clamps** outside its stop range (stops must span zoom 0–22 for a full-range
+   camera function). The true-scale circle uses an exponential-base-2 interpolation between two
+   stops 2²² apart, which reproduces `accuracy · 2^zoom / (78271.484 · cos(lat))` exactly.
 5. **Camera images** are never streamed — only documented locations + source links (privacy policy
    by design).
 6. Avatars are URL-based (no file upload storage in this deployment).

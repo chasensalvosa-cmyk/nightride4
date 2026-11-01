@@ -1,14 +1,20 @@
 // NIGHTRIDE — Overpass API service module (OpenStreetMap POI extraction).
 // Used for real charging-station locations from OpenStreetMap.
-// Primary mirror overpass.osm.ch (verified reachable); automatic fallback
-// to other public mirrors. No key required. ODbL attribution mandatory.
+// No key required. ODbL attribution mandatory.
+//
+// Mirror order notes (global-only mirrors — regional extracts like
+// overpass.osm.ch return EMPTY results outside their region, which silently
+// breaks the layer, so they are never used here):
+//   1. overpass-api.de   — canonical, fast, global (rate-limited when busy)
+//   2. maps.mail.ru      — VK Maps mirror, global, very reliable, slower
+//   3. kumi.systems      — global, good spare
 
 import { fetchJson } from './http'
 import type { ChargingStation } from '@/types'
 
 const MIRRORS = [
-  'https://overpass.osm.ch/api/interpreter',
   'https://overpass-api.de/api/interpreter',
+  'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
 ]
 
@@ -32,6 +38,24 @@ export function chargingQuery(lat: number, lng: number, radiusM: number): string
   )
 }
 
+function normalize(el: OverpassNode): ChargingStation | null {
+  const tags = el.tags ?? {}
+  const sockets = Object.keys(tags)
+    .filter((k) => k.startsWith('socket:') && tags[k] === 'yes')
+    .map((k) => k.replace('socket:', '').replace(/_/g, ' ').toUpperCase())
+    .slice(0, 4)
+  return {
+    id: `osm-${el.id}`,
+    name: tags.name || tags.operator || 'Charging station',
+    latitude: el.lat,
+    longitude: el.lon,
+    operator: tags.operator || null,
+    capacity: tags.capacity ? Number.parseInt(tags.capacity, 10) || null : null,
+    socketTypes: sockets,
+    sourceUrl: `https://www.openstreetmap.org/node/${el.id}`,
+  }
+}
+
 /** Fetch real OSM charging stations around a point (no invented coordinates). */
 export async function fetchChargingStations(
   lat: number,
@@ -50,7 +74,7 @@ export async function fetchChargingStations(
           'User-Agent': 'NIGHTRIDE/1.0 (e-moto platform)',
         },
         body: `data=${encodeURIComponent(query)}`,
-        timeoutMs: 10000,
+        timeoutMs: 20000,
         retries: 0,
       })
       return (data.elements ?? [])
@@ -62,24 +86,6 @@ export async function fetchChargingStations(
     }
   }
   throw lastError
-}
-
-function normalize(el: OverpassNode): ChargingStation | null {
-  const tags = el.tags ?? {}
-  const sockets = Object.keys(tags)
-    .filter((k) => k.startsWith('socket:') && tags[k] === 'yes')
-    .map((k) => k.replace('socket:', '').replace(/_/g, ' ').toUpperCase())
-    .slice(0, 4)
-  return {
-    id: `osm-${el.id}`,
-    name: tags.name || tags.operator || 'Charging station',
-    latitude: el.lat,
-    longitude: el.lon,
-    operator: tags.operator || null,
-    capacity: tags.capacity ? Number.parseInt(tags.capacity, 10) || null : null,
-    socketTypes: sockets,
-    sourceUrl: `https://www.openstreetmap.org/node/${el.id}`,
-  }
 }
 
 /** Real connectivity test used by /api/status. */

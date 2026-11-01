@@ -1,0 +1,725 @@
+     1→'use client'
+     2→
+     3→// NIGHTRIDE — live map experience.
+     4→// Assembles the MapLibre engine with: search, 7 independent data layers,
+     5→// permission-gated GPS + recenter, location details, report submission,
+     6→// consent-based presence sharing, API status and legend.
+     7→
+     8→import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+     9→import { useSearchParams } from 'next/navigation'
+    10→import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+    11→import { toast } from 'sonner'
+    12→import type { Map as MLMap } from 'maplibre-gl'
+    13→import { MapPin, Radio, TriangleAlert } from 'lucide-react'
+    14→import MapContainer, { type MapBounds } from './MapContainer'
+    15→import { MapControls } from './MapControls'
+    16→import { MapLayers, type LayerStatus } from './MapLayers'
+    17→import { MapSearch } from './MapSearch'
+    18→import { MapLegend } from './MapLegend'
+    19→import { LocationPanel, type MapSelection } from './LocationPanel'
+    20→import { MarkerRenderer, type MapMarkerData } from './MarkerRenderer'
+    21→import { RouteOverlay } from './RouteOverlay'
+    22→import { RoutePanel } from './RoutePanel'
+    23→import { ReportSheet, type ReportDraft } from './ReportSheet'
+    24→import { SaveLocationDialog, type SaveLocationDraft } from '@/components/shared/save-location-dialog'
+    25→import { FlagDialog } from '@/components/shared/flag-dialog'
+    26→import { StatusDot } from '@/components/shared/status'
+    27→import { Button } from '@/components/ui/button'
+    28→import { useMapStore, DEFAULT_VIEW } from '@/stores/map-store'
+    29→import { useRealtimeStore } from '@/stores/realtime-store'
+    30→import { useAuth } from '@/hooks/use-auth'
+    31→import { useGeolocation } from '@/hooks/use-geolocation'
+    32→import { useRealtime } from '@/hooks/use-realtime'
+    33→import { fetchReports, confirmReport } from '@/services/community/communityService'
+    34→import { fetchChargingStations } from '@/services/map/chargingService'
+    35→import { fetchRoute } from '@/services/map/routingService'
+    36→import { fetchAviation } from '@/services/aviation/aviationService'
+    37→import { fetchCameras } from '@/services/cameras/cameraService'
+    38→import { fetchApiStatus } from '@/services/publicSafety/apiStatusService'
+    39→import type { CommunityReport, ReportCategory } from '@/types'
+    40→
+    41→const HAZARD_CATEGORIES: ReportCategory[] = ['road_hazard', 'damaged_road', 'construction', 'general_safety']
+    42→const CLOSURE_CATEGORIES: ReportCategory[] = ['road_closure']
+    43→const RIDING_CATEGORIES: ReportCategory[] = ['riding_location']
+    44→const POLICE_CATEGORIES: ReportCategory[] = ['police_activity']
+    45→
+    46→function categoryIcon(category: ReportCategory): MapMarkerData['icon'] {
+    47→  switch (category) {
+    48→    case 'road_hazard': return 'hazard'
+    49→    case 'damaged_road': return 'damage'
+    50→    case 'construction': return 'construction'
+    51→    case 'road_closure': return 'closure'
+    52→    case 'charging_station': return 'charging'
+    53→    case 'riding_location': return 'riding'
+    54→    case 'police_activity': return 'police'
+    55→    default: return 'safety'
+    56→  }
+    57→}
+    58→
+    59→export default function MapView() {
+    60→  const queryClient = useQueryClient()
+    61→  const { user } = useAuth()
+    62→  const layers = useMapStore((s) => s.layers)
+    63→  const setLayer = useMapStore((s) => s.setLayer)
+    64→  const view = useMapStore((s) => s.view)
+    65→  const basemapLabel = useMapStore((s) => s.basemap.label)
+    66→
+    67→  const [mapInstance, setMapInstance] = useState<MLMap | null>(null)
+    68→  const [bounds, setBounds] = useState<MapBounds | null>(null)
+    69→  const [selection, setSelection] = useState<MapSelection | null>(null)
+    70→  const [selectedMarkerId, setSelectedMarkerId] = useState<string | null>(null)
+    71→  const [mapError, setMapError] = useState<string | null>(null)
+    72→  const [reportOpen, setReportOpen] = useState(false)
+    73→  const [reportDraft, setReportDraft] = useState<ReportDraft | null>(null)
+    74→  const [saveOpen, setSaveOpen] = useState(false)
+    75→  const [saveDraft, setSaveDraft] = useState<SaveLocationDraft | null>(null)
+    76→  const [flagTarget, setFlagTarget] = useState<string | null>(null)
+    77→  const [flagOpen, setFlagOpen] = useState(false)
+    78→  const [locating, setLocating] = useState(false)
+    79→  const [routeDestination, setRouteDestination] = useState<{
+    80→    lat: number
+    81→    lng: number
+    82→    label?: string
+    83→  } | null>(null)
+    84→  const [activeRouteIdx, setActiveRouteIdx] = useState(0)
+    85→  const deepLinkApplied = useRef(false)
+    86→
+    87→  // GPS: auto-start on mount — the browser asks for permission once, then the
+    88→  // red own-position dot follows the rider. Presence *sharing* stays opt-in.
+    89→  const geo = useGeolocation({ auto: true })
+    90→  const sharingPresence = useRealtimeStore((s) => s.sharingPresence)
+    91→  const setSharingPresence = useRealtimeStore((s) => s.setSharingPresence)
+    92→  const realtimeConnected = useRealtimeStore((s) => s.connected)
+    93→  const riders = useRealtimeStore((s) => s.riders)
+    94→
+    95→  // ------------------------------------------------------------ deep links
+    96→  // Waits for the live map instance: applying coordinates before the engine
+    97→  // is ready silently no-ops (and the ref guard would then swallow the retry).
+    98→  const searchParams = useSearchParams()
+    99→  useEffect(() => {
+   100→    if (deepLinkApplied.current) return
+   101→    const lat = Number.parseFloat(searchParams.get('lat') ?? '')
+   102→    const lng = Number.parseFloat(searchParams.get('lng') ?? '')
+   103→    const zoom = Number.parseFloat(searchParams.get('zoom') ?? '')
+   104→    const layerParam = searchParams.get('layers')
+   105→    if (!mapInstance && (Number.isFinite(lat) || layerParam)) return
+   106→    deepLinkApplied.current = true
+   107→    if (Number.isFinite(lat) && Number.isFinite(lng)) {
+   108→      useMapStore.getState().setView({
+   109→        lat,
+   110→        lng,
+   111→        ...(Number.isFinite(zoom) ? { zoom } : {}),
+   112→      })
+   113→      mapInstance?.flyTo({ center: [lng, lat], zoom: Number.isFinite(zoom) ? zoom : view.zoom })
+   114→    }
+   115→    if (layerParam) {
+   116→      for (const id of layerParam.split(',')) {
+   117→        if (id in layers) setLayer(id as keyof typeof layers, true)
+   118→      }
+   119→    }
+   120→  }, [searchParams, mapInstance])
+   121→
+   122→  // ------------------------------------------------------------ auto-center on first fix
+   123→  // When the rider opens the map, snap the view to their real position once
+   124→  // (unless the URL deep-links to specific coordinates). Later pans win.
+   125→  const centeredOnFix = useRef(false)
+   126→  const deepLinkCoords =
+   127→    searchParams.has('lat') && searchParams.has('lng')
+   128→  useEffect(() => {
+   129→    if (centeredOnFix.current || !geo.coords || !mapInstance) return
+   130→    if (deepLinkCoords) {
+   131→      centeredOnFix.current = true
+   132→      return
+   133→    }
+   134→    centeredOnFix.current = true
+   135→    mapInstance.flyTo({
+   136→      center: [geo.coords.lng, geo.coords.lat],
+   137→      zoom: Math.max(view.zoom, 13),
+   138→      duration: 900,
+   139→    })
+   140→  }, [geo.coords, mapInstance, view.zoom, deepLinkCoords])
+   141→
+   142→  const mapApiRef = useRef<MLMap | null>(null)
+   143→  const handleMapReady = useCallback((map: MLMap) => {
+   144→    mapApiRef.current = map
+   145→    setMapInstance(map)
+   146→    // Seed layer bounds immediately (queries keyed on bounds start at once).
+   147→    const b = map.getBounds()
+   148→    setBounds({ minLat: b.getSouth(), minLng: b.getWest(), maxLat: b.getNorth(), maxLng: b.getEast() })
+   149→  }, [])
+   150→
+   151→  // ------------------------------------------------------------ data layers
+   152→  const anyReportLayer =
+   153→    layers.road_hazards || layers.road_closures || layers.riding_areas || layers.charging || layers.police_activity
+   154→
+   155→  const reportsQuery = useQuery({
+   156→    queryKey: ['map-reports'],
+   157→    queryFn: () => fetchReports({ limit: 200 }),
+   158→    enabled: anyReportLayer,
+   159→    staleTime: 60_000,
+   160→  })
+   161→
+   162→  const centerKey = `${view.lat.toFixed(2)}:${view.lng.toFixed(2)}`
+   163→  const chargingQuery = useQuery({
+   164→    queryKey: ['charging', centerKey],
+   165→    queryFn: () => fetchChargingStations(view.lat, view.lng, 9000),
+   166→    enabled: layers.charging,
+   167→    staleTime: 5 * 60_000,
+   168→  })
+   169→
+   170→  const bboxKey = bounds
+   171→    ? `${bounds.minLat.toFixed(1)}:${bounds.minLng.toFixed(1)}:${bounds.maxLat.toFixed(1)}:${bounds.maxLng.toFixed(1)}`
+   172→    : 'none'
+   173→  const aviationQuery = useQuery({
+   174→    queryKey: ['aviation', bboxKey],
+   175→    queryFn: () =>
+   176→      fetchAviation({
+   177→        minLat: bounds!.minLat,
+   178→        minLng: bounds!.minLng,
+   179→        maxLat: bounds!.maxLat,
+   180→        maxLng: bounds!.maxLng,
+   181→      }),
+   182→    enabled: layers.aviation && !!bounds,
+   183→    refetchInterval: 15_000,
+   184→    staleTime: 10_000,
+   185→  })
+   186→
+   187→  const camerasQuery = useQuery({
+   188→    queryKey: ['cameras', bboxKey],
+   189→    queryFn: () =>
+   190→      fetchCameras(
+   191→        bounds
+   192→          ? {
+   193→              minLat: bounds.minLat,
+   194→              minLng: bounds.minLng,
+   195→              maxLat: bounds.maxLat,
+   196→              maxLng: bounds.maxLng,
+   197→            }
+   198→          : undefined,
+   199→      ),
+   200→    enabled: layers.cameras && !!bounds,
+   201→    staleTime: 5 * 60_000,
+   202→  })
+   203→
+   204→  const statusQuery = useQuery({
+   205→    queryKey: ['api-status'],
+   206→    queryFn: fetchApiStatus,
+   207→    refetchInterval: 60_000,
+   208→    staleTime: 45_000,
+   209→  })
+   210→
+   211→  // ------------------------------------------------------------ fastest routes
+   212→  // Origin = live GPS (3 dp ≈ 110 m granularity avoids refetch spam while the
+   213→  // watcher ticks). Destination changes or rider movement > ~110 m trigger a
+   214→  // reroute; the panel always re-selects the fastest option on new data.
+   215→  const originKey = geo.coords
+   216→    ? `${geo.coords.lat.toFixed(3)},${geo.coords.lng.toFixed(3)}`
+   217→    : null
+   218→  const destKey = routeDestination
+   219→    ? `${routeDestination.lat.toFixed(5)},${routeDestination.lng.toFixed(5)}`
+   220→    : null
+   221→  const routeQuery = useQuery({
+   222→    queryKey: ['route', originKey, destKey],
+   223→    queryFn: () =>
+   224→      fetchRoute(
+   225→        { lat: geo.coords!.lat, lng: geo.coords!.lng },
+   226→        { lat: routeDestination!.lat, lng: routeDestination!.lng },
+   227→      ),
+   228→    enabled: !!originKey && !!destKey,
+   229→    staleTime: 30_000,
+   230→    retry: 1,
+   231→  })
+   232→  const routeOptions = useMemo(() => routeQuery.data?.data ?? [], [routeQuery.data])
+   233→  useEffect(() => {
+   234→    setActiveRouteIdx(0)
+   235→  }, [routeQuery.data])
+   236→
+   237→  // Realtime → refresh layer data when community events arrive.
+   238→  useRealtime({
+   239→    onReportNew: () => {
+   240→      void queryClient.invalidateQueries({ queryKey: ['map-reports'] })
+   241→    },
+   242→    onReportUpdated: () => {
+   243→      void queryClient.invalidateQueries({ queryKey: ['map-reports'] })
+   244→    },
+   245→    onCommentNew: () => {
+   246→      void queryClient.invalidateQueries({ queryKey: ['map-reports'] })
+   247→    },
+   248→  })
+   249→
+   250→  const reports = useMemo(() => reportsQuery.data?.reports ?? [], [reportsQuery.data])
+   251→  const stations = useMemo(
+   252→    () => [
+   253→      ...(chargingQuery.data?.data ?? []),
+   254→      ...(layers.charging
+   255→        ? reports
+   256→            .filter((r) => r.category === 'charging_station')
+   257→            .map((r) => ({
+   258→              id: `report-${r.id}`,
+   259→              name: r.title,
+   260→              latitude: r.latitude,
+   261→              longitude: r.longitude,
+   262→              operator: null,
+   263→              capacity: null,
+   264→              socketTypes: [],
+   265→              sourceUrl: `/community?report=${r.id}`,
+   266→            }))
+   267→        : []),
+   268→    ],
+   269→    [chargingQuery.data, reports, layers.charging],
+   270→  )
+   271→  const aircraft = useMemo(() => aviationQuery.data?.data ?? [], [aviationQuery.data])
+   272→  const cameras = useMemo(() => camerasQuery.data?.data ?? [], [camerasQuery.data])
+   273→
+   274→  // ------------------------------------------------------------ markers
+   275→  const markers = useMemo<MapMarkerData[]>(() => {
+   276→    const list: MapMarkerData[] = []
+   277→
+   278→    if (layers.road_hazards || layers.road_closures || layers.riding_areas || layers.police_activity) {
+   279→      for (const r of reports) {
+   280→        const isHazard = HAZARD_CATEGORIES.includes(r.category)
+   281→        const isClosure = CLOSURE_CATEGORIES.includes(r.category)
+   282→        const isRiding = RIDING_CATEGORIES.includes(r.category)
+   283→        const isPolice = POLICE_CATEGORIES.includes(r.category)
+   284→        const show =
+   285→          (isHazard && layers.road_hazards) ||
+   286→          (isClosure && layers.road_closures) ||
+   287→          (isRiding && layers.riding_areas) ||
+   288→          (isPolice && layers.police_activity)
+   289→        if (!show) continue
+   290→        list.push({
+   291→          id: `report-${r.id}`,
+   292→          layer: 'report',
+   293→          lat: r.latitude,
+   294→          lng: r.longitude,
+   295→          icon: categoryIcon(r.category),
+   296→          label: r.title,
+   297→          selected: selectedMarkerId === `report-${r.id}`,
+   298→          onClick: () => {
+   299→            setSelectedMarkerId(`report-${r.id}`)
+   300→            setSelection({ kind: 'report', report: r })
+   301→          },
+   302→        })
+   303→      }
+   304→    }
+   305→
+   306→    if (layers.charging) {
+   307→      for (const s of stations) {
+   308→        list.push({
+   309→          id: `chg-${s.id}`,
+   310→          layer: 'charging',
+   311→          lat: s.latitude,
+   312→          lng: s.longitude,
+   313→          icon: 'charging',
+   314→          label: s.name,
+   315→          selected: selectedMarkerId === `chg-${s.id}`,
+   316→          onClick: () => {
+   317→            setSelectedMarkerId(`chg-${s.id}`)
+   318→            setSelection({ kind: 'charging', station: s })
+   319→          },
+   320→        })
+   321→      }
+   322→    }
+   323→
+   324→    if (layers.cameras && camerasQuery.data?.freshness !== 'unavailable') {
+   325→      for (const c of cameras) {
+   326→        list.push({
+   327→          id: `cam-${c.id}`,
+   328→          layer: 'cameras',
+   329→          lat: c.latitude,
+   330→          lng: c.longitude,
+   331→          icon: c.cameraType === 'alpr' ? 'alpr' : 'camera',
+   332→          label: c.name,
+   333→          selected: selectedMarkerId === `cam-${c.id}`,
+   334→          onClick: () => {
+   335→            setSelectedMarkerId(`cam-${c.id}`)
+   336→            setSelection({ kind: 'camera', camera: c })
+   337→          },
+   338→        })
+   339→      }
+   340→    }
+   341→
+   342→    if (layers.aviation && aviationQuery.data?.freshness !== 'unavailable') {
+   343→      for (const a of aircraft) {
+   344→        list.push({
+   345→          id: `av-${a.icao24}`,
+   346→          layer: 'aviation',
+   347→          lat: a.latitude,
+   348→          lng: a.longitude,
+   349→          icon: 'plane',
+   350→          rotate: a.trueTrack,
+   351→          label: a.callsign ?? a.icao24,
+   352→          selected: selectedMarkerId === `av-${a.icao24}`,
+   353→          onClick: () => {
+   354→            setSelectedMarkerId(`av-${a.icao24}`)
+   355→            setSelection({ kind: 'aircraft', aircraft: a })
+   356→          },
+   357→        })
+   358→      }
+   359→    }
+   360→
+   361→    if (layers.riders) {
+   362→      for (const r of riders) {
+   363→        list.push({
+   364→          id: `rider-${r.userId}`,
+   365→          layer: 'riders',
+   366→          lat: r.lat,
+   367→          lng: r.lng,
+   368→          icon: 'rider',
+   369→          label: r.username,
+   370→          selected: selectedMarkerId === `rider-${r.userId}`,
+   371→          onClick: () => {
+   372→            setSelectedMarkerId(`rider-${r.userId}`)
+   373→            setSelection({ kind: 'rider', rider: r })
+   374→          },
+   375→        })
+   376→      }
+   377→    }
+   378→
+   379→    return list
+   380→  }, [layers, reports, stations, cameras, aircraft, riders, selectedMarkerId, camerasQuery.data, aviationQuery.data])
+   381→
+   382→  // ------------------------------------------------------------ presence (explicit consent)
+   383→  const { sharePresence, stopPresence } = useRealtime({})
+   384→  const canSharePresence = !!user && geo.permission === 'granted'
+   385→
+   386→  const handleSharePresence = useCallback(
+   387→    (share: boolean) => {
+   388→      if (share && !canSharePresence) {
+   389→        toast.error('Cannot share position', {
+   390→          description: user
+   391→            ? 'Grant location permission first (tap the recenter control).'
+   392→            : 'Sign in, then grant location permission to share your position.',
+   393→        })
+   394→        return
+   395→      }
+   396→      setSharingPresence(share)
+   397→      if (!share) stopPresence()
+   398→    },
+   399→    [canSharePresence, user, setSharingPresence, stopPresence],
+   400→  )
+   401→
+   402→  useEffect(() => {
+   403→    if (!sharingPresence || !user || !geo.coords) return
+   404→    const emit = () => {
+   405→      const c = geo.coords
+   406→      if (!c) return
+   407→      sharePresence({
+   408→        userId: user.id,
+   409→        username: user.username,
+   410→        lat: c.lat,
+   411→        lng: c.lng,
+   412→        heading: c.heading,
+   413→        speedKmh: c.speed != null ? c.speed * 3.6 : null,
+   414→      })
+   415→    }
+   416→    emit()
+   417→    const timer = setInterval(emit, 5000)
+   418→    return () => clearInterval(timer)
+   419→  }, [sharingPresence, user, geo.coords?.lat, geo.coords?.lng])
+   420→
+   421→  useEffect(() => {
+   422→    return () => {
+   423→      // leaving the map stops sharing — consent is page-scoped
+   424→      if (useRealtimeStore.getState().sharingPresence) {
+   425→        stopPresence()
+   426→        useRealtimeStore.getState().setSharingPresence(false)
+   427→      }
+   428→    }
+   429→  }, [stopPresence])
+   430→
+   431→  // ------------------------------------------------------------ GPS + recenter + routing
+   432→  const recenter = useCallback(async () => {
+   433→    setLocating(true)
+   434→    try {
+   435→      let coords = geo.coords
+   436→      if (!coords) {
+   437→        coords = await geo.requestOnce()
+   438→      }
+   439→      if (coords) {
+   440→        geo.start()
+   441→        mapInstance?.flyTo({ center: [coords.lng, coords.lat], zoom: Math.max(view.zoom, 14), duration: 900 })
+   442→      } else {
+   443→        toast.error('Location unavailable', {
+   444→          description: geo.error ?? 'Grant location permission to center the map on your position.',
+   445→        })
+   446→      }
+   447→    } finally {
+   448→      setLocating(false)
+   449→    }
+   450→  }, [geo.coords, geo.error, mapInstance, view.zoom])
+   451→
+   452→  /** Choose a destination → plan fastest routes from the rider's live
+   453→   *  position (asks for a one-shot fix if none exists yet). */
+   454→  const routeHere = useCallback(
+   455→    async (lat: number, lng: number, label?: string) => {
+   456→      let origin = geo.coords
+   457→      if (!origin) {
+   458→        setLocating(true)
+   459→        try {
+   460→          origin = await geo.requestOnce()
+   461→        } finally {
+   462→          setLocating(false)
+   463→        }
+   464→      }
+   465→      if (!origin) {
+   466→        toast.error('Cannot plan a route', {
+   467→          description:
+   468→            geo.error ?? 'Grant location permission so the route can start from your position.',
+   469→        })
+   470→        return
+   471→      }
+   472→      geo.start()
+   473→      setActiveRouteIdx(0)
+   474→      setRouteDestination({ lat, lng, label })
+   475→    },
+   476→    [geo.coords, geo.error, geo.requestOnce, geo.start],
+   477→  )
+   478→
+   479→  // ------------------------------------------------------------ report / save / confirm / flag
+   480→  const openReport = useCallback(
+   481→    (lat: number, lng: number, label?: string) => {
+   482→      setReportDraft({ lat, lng, label })
+   483→      setReportOpen(true)
+   484→    },
+   485→    [],
+   486→  )
+   487→
+   488→  const confirmMutation = useMutation({
+   489→    mutationFn: (id: string) => confirmReport(id),
+   490→    onSuccess: (res) => {
+   491→      toast.success(`Confirmed — ${res.confirmationCount} total`)
+   492→      void queryClient.invalidateQueries({ queryKey: ['map-reports'] })
+   493→    },
+   494→    onError: (err) => {
+   495→      toast.error('Could not confirm', {
+   496→        description: err.message.includes('Sign in') ? 'Sign in to confirm reports.' : err.message,
+   497→      })
+   498→    },
+   499→  })
+   500→
+   501→  // ------------------------------------------------------------ layer statuses
+   502→  const layerStatuses: Partial<Record<keyof typeof layers, LayerStatus>> = useMemo(() => {
+   503→    const out: Partial<Record<keyof typeof layers, LayerStatus>> = {
+   504→      riders: { count: riders.length },
+   505→      road_hazards: { count: reports.filter((r) => HAZARD_CATEGORIES.includes(r.category)).length },
+   506→      road_closures: { count: reports.filter((r) => CLOSURE_CATEGORIES.includes(r.category)).length },
+   507→      riding_areas: { count: reports.filter((r) => RIDING_CATEGORIES.includes(r.category)).length },
+   508→      police_activity: { count: reports.filter((r) => POLICE_CATEGORIES.includes(r.category)).length },
+   509→      charging: { count: stations.length, loading: chargingQuery.isFetching },
+   510→    }
+   511→    if (layers.cameras) {
+   512→      out.cameras =
+   513→        camerasQuery.data?.freshness === 'unavailable'
+   514→          ? { unavailable: 'No source synced' }
+   515→          : { count: cameras.length, loading: camerasQuery.isFetching }
+   516→    }
+   517→    if (layers.aviation) {
+   518→      out.aviation =
+   519→        aviationQuery.data?.freshness === 'unavailable'
+   520→          ? { unavailable: aviationQuery.data?.note?.slice(0, 48) ?? 'Unreachable' }
+   521→          : { count: aircraft.length, loading: aviationQuery.isFetching }
+   522→    }
+   523→    return out
+   524→  }, [riders.length, reports, stations.length, chargingQuery.isFetching, camerasQuery, cameras.length, aviationQuery, aircraft.length, layers.cameras, layers.aviation])
+   525→
+   526→  const basemapProvider = statusQuery.data?.providers.find((p) => p.key === 'mapbox')
+   527→  const osmProvider = statusQuery.data?.providers.find((p) => p.key === 'osm')
+   528→  const dataProviders = statusQuery.data?.providers.filter((p) =>
+   529→    ['aviation', 'charging', 'public_safety'].includes(p.key),
+   530→  )
+   531→  const dataOk =
+   532→    !!dataProviders && dataProviders.some((p) => p.status === 'connected')
+   533→  const dataAnyMissing = !!dataProviders && dataProviders.every((p) => p.status !== 'connected')
+   534→
+   535→  return (
+   536→    <div className="relative h-full w-full bg-background">
+   537→      <MapContainer
+   538→        onReady={handleMapReady}
+   539→        onMoveEnd={(_view, b) => setBounds(b)}
+   540→        onMapClick={(lat, lng) => {
+   541→          setSelection({ kind: 'point', lat, lng })
+   542→          setSelectedMarkerId(null)
+   543→        }}
+   544→        onMapError={(msg) => setMapError(msg)}
+   545→        userLocation={geo.coords ? { lat: geo.coords.lat, lng: geo.coords.lng } : null}
+   546→      >
+   547→        {/* top-left: search + status */}
+   548→        <div className="absolute left-3 top-3 z-10 flex w-[calc(100%-9rem)] max-w-xs flex-col gap-2 md:w-80">
+   549→          <MapSearch
+   550→            userLocation={geo.coords}
+   551→            onSelect={(r) => {
+   552→              setSelectedMarkerId(null)
+   553→              mapInstance?.flyTo({ center: [r.longitude, r.latitude], zoom: 14, duration: 900 })
+   554→              setSelection({ kind: 'point', lat: r.latitude, lng: r.longitude })
+   555→              // choosing a searched place = choosing a destination → route it
+   556→              void routeHere(r.latitude, r.longitude, r.label)
+   557→            }}
+   558→          />
+   559→          <div className="pointer-events-auto rounded-lg border border-border bg-panel/95 px-3 py-2 backdrop-blur-sm">
+   560→            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+   561→              <span className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-text-muted">
+   562→                <StatusDot
+   563→                  status={
+   564→                    basemapProvider?.status === 'connected' || osmProvider?.status === 'connected'
+   565→                      ? 'connected'
+   566→                      : 'error'
+   567→                  }
+   568→                />
+   569→                Map
+   570→              </span>
+   571→              <span className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-text-muted">
+   572→                <StatusDot status={dataAnyMissing ? 'error' : dataOk ? 'connected' : 'missing'} />
+   573→                Data
+   574→              </span>
+   575→              <span className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-text-muted">
+   576→                <StatusDot status={realtimeConnected ? 'connected' : 'missing'} />
+   577→                Live
+   578→              </span>
+   579→              <span className="ml-auto hidden text-[10px] text-text-muted md:inline">
+   580→                {basemapLabel}
+   581→              </span>
+   582→            </div>
+   583→            {mapError && (
+   584→              <p className="mt-1 truncate text-[10px] text-status-warning" title={mapError}>
+   585→                {mapError}
+   586→              </p>
+   587→            )}
+   588→          </div>
+   589→
+   590→          {/* fastest-route options (all viewports) */}
+   591→          {routeDestination && (
+   592→            <RoutePanel
+   593→              destination={routeDestination}
+   594→              routes={routeOptions}
+   595→              activeIndex={activeRouteIdx}
+   596→              onSelect={setActiveRouteIdx}
+   597→              onClear={() => {
+   598→                setRouteDestination(null)
+   599→                setActiveRouteIdx(0)
+   600→              }}
+   601→              fetching={routeQuery.isFetching}
+   602→              freshness={routeQuery.data?.freshness ?? 'unavailable'}
+   603→              note={routeQuery.data?.note}
+   604→              attribution={
+   605→                routeQuery.data?.attribution ??
+   606→                'Routing © OpenStreetMap contributors, ODbL — OSRM'
+   607→              }
+   608→            />
+   609→          )}
+   610→
+   611→          {/* location details (desktop) */}
+   612→          {selection && (
+   613→            <div className="hidden md:block">
+   614→              <LocationPanel
+   615→                selection={selection}
+   616→                onClose={() => {
+   617→                  setSelection(null)
+   618→                  setSelectedMarkerId(null)
+   619→                }}
+   620→                onReportHere={openReport}
+   621→                onSaveHere={(lat, lng, label) => {
+   622→                  setSaveDraft({ lat, lng, label })
+   623→                  setSaveOpen(true)
+   624→                }}
+   625→                onRouteHere={routeHere}
+   626→                onConfirmReport={(id) => confirmMutation.mutate(id)}
+   627→                onFlagReport={(id) => {
+   628→                  setFlagTarget(id)
+   629→                  setFlagOpen(true)
+   630→                }}
+   631→                canModerate={!!user}
+   632→              />
+   633→            </div>
+   634→          )}
+   635→        </div>
+   636→
+   637→        {/* top-right: layers */}
+   638→        <div className="absolute right-3 top-3 z-10 w-56 md:w-64">
+   639→          <MapLayers
+   640→            statuses={layerStatuses}
+   641→            onSharePresence={handleSharePresence}
+   642→            sharingPresence={sharingPresence}
+   643→            canSharePresence={canSharePresence}
+   644→          />
+   645→        </div>
+   646→
+   647→        {/* bottom-right: controls + report */}
+   648→        <div className="absolute bottom-20 right-3 z-10 flex flex-col items-end gap-2 md:bottom-8">
+   649→          <Button
+   650→            size="sm"
+   651→            onClick={() => openReport(view.lat, view.lng)}
+   652→            className="h-9 gap-1.5 rounded-lg"
+   653→          >
+   654→            <TriangleAlert className="h-3.5 w-3.5" aria-hidden />
+   655→            Report
+   656→          </Button>
+   657→          <MapControls onRecenter={recenter} locating={locating} />
+   658→        </div>
+   659→
+   660→        {/* bottom-left: legend (desktop only) */}
+   661→        <div className="absolute bottom-8 left-3 z-10 hidden md:block">
+   662→          <MapLegend />
+   663→        </div>
+   664→
+   665→        {/* mobile: location details bottom sheet */}
+   666→        {selection && (
+   667→          <div className="absolute inset-x-3 bottom-20 z-10 md:hidden">
+   668→            <LocationPanel
+   669→              selection={selection}
+   670→              onClose={() => {
+   671→                setSelection(null)
+   672→                setSelectedMarkerId(null)
+   673→              }}
+   674→              onReportHere={openReport}
+   675→              onSaveHere={(lat, lng, label) => {
+   676→                setSaveDraft({ lat, lng, label })
+   677→                setSaveOpen(true)
+   678→              }}
+   679→              onRouteHere={routeHere}
+   680→              onConfirmReport={(id) => confirmMutation.mutate(id)}
+   681→              onFlagReport={(id) => {
+   682→                setFlagTarget(id)
+   683→                setFlagOpen(true)
+   684→              }}
+   685→              canModerate={!!user}
+   686→            />
+   687→          </div>
+   688→        )}
+   689→
+   690→        {/* loading indicator while the engine boots */}
+   691→        {!mapInstance && (
+   692→          <div className="absolute inset-0 z-20 flex items-center justify-center bg-background/80">
+   693→            <div className="flex flex-col items-center gap-3">
+   694→              <span className="flex h-10 w-10 animate-pulse items-center justify-center rounded-lg border border-border bg-panel">
+   695→                <MapPin className="h-5 w-5 text-text-muted" aria-hidden />
+   696→              </span>
+   697→              <p className="text-xs text-text-muted">Loading map…</p>
+   698→            </div>
+   699→          </div>
+   700→        )}
+   701→
+   702→        <MarkerRenderer map={mapInstance} markers={markers} />
+   703→        {routeDestination && (
+   704→          <RouteOverlay
+   705→            map={mapInstance}
+   706→            routes={routeOptions}
+   707→            activeIndex={activeRouteIdx}
+   708→            destination={routeDestination}
+   709→            fitKey={`${destKey ?? ''}:${activeRouteIdx}`}
+   710→          />
+   711→        )}
+   712→      </MapContainer>
+   713→
+   714→      <ReportSheet open={reportOpen} draft={reportDraft} onOpenChange={setReportOpen} />
+   715→      <SaveLocationDialog open={saveOpen} draft={saveDraft} onOpenChange={setSaveOpen} />
+   716→      <FlagDialog
+   717→        open={flagOpen}
+   718→        onOpenChange={setFlagOpen}
+   719→        itemType="report"
+   720→        itemId={flagTarget}
+   721→      />
+   722→    </div>
+   723→  )
+   724→}
+   725→

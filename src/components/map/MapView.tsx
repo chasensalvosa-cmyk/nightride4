@@ -439,6 +439,17 @@ export default function MapView() {
       if (coords) {
         geo.start()
         mapInstance?.flyTo({ center: [coords.lng, coords.lat], zoom: Math.max(view.zoom, 14), duration: 900 })
+        // Honest fix quality: GPS converges to tens of meters; Wi-Fi/network
+        // positioning (desktop browsers) can be off by a neighborhood.
+        const acc = Math.round(coords.accuracy)
+        if (acc > 150) {
+          toast.info(`Centered — ±${acc} m accuracy`, {
+            description:
+              'Wi-Fi/network positioning. The red circle shows the real uncertainty — for street-level GPS precision use your phone.',
+          })
+        } else {
+          toast.success(`Centered — ±${acc} m GPS accuracy`)
+        }
       } else {
         toast.error('Location unavailable', {
           description: geo.error ?? 'Grant location permission to center the map on your position.',
@@ -542,7 +553,15 @@ export default function MapView() {
           setSelectedMarkerId(null)
         }}
         onMapError={(msg) => setMapError(msg)}
-        userLocation={geo.coords ? { lat: geo.coords.lat, lng: geo.coords.lng } : null}
+        userLocation={
+          geo.coords
+            ? {
+                lat: geo.coords.lat,
+                lng: geo.coords.lng,
+                accuracy: geo.coords.accuracy,
+              }
+            : null
+        }
       >
         {/* top-left: search + status */}
         <div className="absolute left-3 top-3 z-10 flex w-[calc(100%-9rem)] max-w-xs flex-col gap-2 md:w-80">
@@ -576,6 +595,19 @@ export default function MapView() {
                 <StatusDot status={realtimeConnected ? 'connected' : 'missing'} />
                 Live
               </span>
+              {geo.coords && (
+                <span
+                  className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-text-muted"
+                  title={
+                    geo.coords.accuracy > 150
+                      ? 'Wi-Fi/network positioning — the red circle on the map shows the real uncertainty. Use a phone for street-level GPS precision.'
+                      : 'Live GPS accuracy of your position fix'
+                  }
+                >
+                  <StatusDot status={geo.coords.accuracy > 150 ? 'missing' : 'connected'} />
+                  GPS ±{Math.max(5, Math.round(geo.coords.accuracy))} m
+                </span>
+              )}
               <span className="ml-auto hidden text-[10px] text-text-muted md:inline">
                 {basemapLabel}
               </span>

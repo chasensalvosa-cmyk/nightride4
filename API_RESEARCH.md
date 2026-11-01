@@ -38,16 +38,16 @@ Legend for integration difficulty: 🟢 low (no key, REST/JSON) · 🟡 medium (
 | Official docs | https://openfreemap.org/docs/ , https://github.com/openmaptiles , https://server.arcgisonline.com/arcgis/rest/services/Canvas/World_Dark_Gray_Base/MapServer , https://wiki.openstreetmap.org/wiki/Raster_tile_providers , https://nominatim.org/release-docs/latest/api/ , https://wiki.openstreetmap.org/wiki/Overpass_API |
 | Authentication | None (usage policy compliance instead) |
 | Credentials needed | None |
-| Endpoints used | `https://tiles.openfreemap.org/styles/dark` (vector style + `…/planet` tiles), `https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_{Base,Reference}/MapServer/tile/{z}/{y}/{x}` (raster fallback), `https://nominatim.openstreetmap.org/search|reverse?…` , `https://overpass.osm.ch/api/interpreter?data=[out:json];node[amenity=charging_station](around:…);out;` |
-| Data fields | Nominatim: lat/lon, display_name, type, class. Overpass: id, lat, lon, tags (operator, capacity, socket types) |
-| Update frequency | OpenFreeMap ≈ weekly OSM planet refresh; Nominatim ≈ real-time OSM replication; Overpass mirrors ≈ minutes behind OSM |
+| Endpoints used | `https://tiles.openfreemap.org/styles/dark` (vector style + `…/planet` tiles), `https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_{Base,Reference}/MapServer/tile/{z}/{y}/{x}` (raster fallback), `https://nominatim.openstreetmap.org/search|reverse?…` , `https://photon.komoot.io/api/?q=…&lat=…&lon=…&bbox=…` , `https://overpass-api.de/api/interpreter` (mirror chain, see below) |
+| Data fields | Nominatim: lat/lon, display_name, type, class. Photon: osm_key/osm_value, name, address parts. Overpass: id, lat, lon, tags (operator, capacity, socket types) |
+| Update frequency | OpenFreeMap ≈ weekly OSM planet refresh; Nominatim ≈ real-time OSM replication; Photon ≈ daily OSM import; Overpass mirrors ≈ minutes behind OSM |
 | Coverage | Global |
 | Pricing | Free (OpenFreeMap free incl. commercial use; Esri public canvas tiles free with attribution) |
-| Rate limits | OpenFreeMap: no hard limit, fair use. Nominatim: max 1 req/s, custom User-Agent mandatory. Overpass: 2 concurrent slots, be gentle; mirror `overpass.osm.ch` verified reachable from this sandbox (`overpass-api.de` is blocked at network level here) |
+| Rate limits | OpenFreeMap: no hard limit, fair use. Nominatim: max 1 req/s, custom User-Agent mandatory. Photon (komoot public instance): moderate use, descriptive User-Agent. Overpass: 2 concurrent slots, be gentle |
 | Commercial use | Allowed with ODbL attribution; heavy commercial use of public Nominatim is not allowed (self-host recommended) |
 | Redistribution | ODbL 1.0 — attribution "© OpenStreetMap contributors" mandatory; Esri tiles additionally "Tiles © Esri" |
 | Difficulty | 🟢 |
-| **Live test** | OpenFreeMap `styles/dark` `200 OK` (valid MapLibre style, background `rgb(12,12,12)`) · Esri Dark_Gray_Base tile `200 OK` (`image/jpeg`) + Reference tile `200 OK` (`image/png`) · Nominatim search `200 OK` (608 ms, real result) · `overpass.osm.ch` `200 OK` (778 ms) · `overpass-api.de`, `overpass.kumi.systems`, `overpass.private.coffee` **blocked** in this sandbox |
+| **Live test** | OpenFreeMap `styles/dark` `200 OK` (valid MapLibre style, background `rgb(12,12,12)`) · Esri Dark_Gray_Base tile `200 OK` (`image/jpeg`) + Reference tile `200 OK` (`image/png`) · Nominatim search `200 OK` (608 ms, real result) · Photon search `200 OK` (~1 s, real POIs) · Overpass mirror chain verified (see mirror notes below) |
 
 > **⚠ CARTO basemap tiles removed (2026-10):** `basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png`
 > now serves watermarked **"API KEY REQUIRED"** images (HTTP 200!) unless a CARTO API key is
@@ -59,8 +59,37 @@ Legend for integration difficulty: 🟢 low (no key, REST/JSON) · 🟡 medium (
 **Chosen strategy (§1.2):** MapLibre GL renders Mapbox dark-v11 when a token is present; otherwise the
 keyless OpenFreeMap dark vector style (fetched + validated client-side at boot), falling back to
 keyless Esri World Dark Gray raster tiles when OpenFreeMap is unreachable. Map search uses
-server-proxied Nominatim with a 24 h cache and min-interval guard; charging stations use
-`overpass.osm.ch` with automatic fallback mirrors and a 10 min cache.
+server-proxied Nominatim + Photon with a 24 h cache and min-interval guard; charging stations use
+the global Overpass mirror chain with a 10 min cache.
+
+**Overpass mirror findings (2026-11, verified from this sandbox):**
+
+| Mirror | Status | Notes |
+|---|---|---|
+| `overpass-api.de` | ⛔ blocked here | canonical, fast, global — first in the chain for deployed environments |
+| `maps.mail.ru/osm/tools/overpass` | ⚠ intermittent | global (VK Maps), ~20 s per query, bursty 504 s under load |
+| `overpass.kumi.systems` | ⛔ blocked here | global spare, last in the chain |
+| `overpass.osm.ch` | ❌ removed | **Switzerland-only extract** — returns `0 elements` (HTTP 200) for any query outside CH, which silently produced empty charging layers worldwide. Regional extracts are never used. |
+| `overpass.osm.jp` | ❌ rejected | TLS certificate expired at time of testing |
+
+**Brand-POI search (2026-11):** two findings fixed the "search can't find Smith's / McDonald's"
+complaint. (1) Nominatim matches literal names — `mcdonalds` returns **nothing** while `McDonald's`
+returns 10 restaurants, `smiths` returns a *locality* while `Smith's` returns the supermarkets; the
+geocoder now pools an apostrophe-variant of the query (trailing `…s` → `…'s`) with the original.
+(2) Photon (komoot) is a POI/brand-focused geocoder with `lat`/`lon` bias + `bbox` + `osm_tag`
+filters; the biased search merges Nominatim (addresses, streets) with Photon (brand POIs),
+dedupes by proximity and sorts by real distance. Both engines degrade independently
+(`Promise.allSettled`) — when Photon is unreachable the apostrophe-smart Nominatim path alone
+still finds brand POIs.
+
+**Nearby category chips (2026-11):** `/api/external/pois?lat=&lng=&category=food|coffee|groceries|fuel|atm|hotel`
+powers one-tap "near me" browsing. Engine = Nominatim category words ("restaurant", "gas
+station", …, bounded ±35 km, limit 30 — Nominatim ranks by *relevance*, so the pool needs depth
+for the distance sort to surface near places) merged best-effort with a Photon brand-term fan-out
+(~10 parallel terms/category), deduped, OSM-type-filtered (an arts centre matching "bank" is
+dropped — no keyword drift), capped to ~30 km riding distance, sorted nearest-first, cached 6 h.
+Empty results are returned live but never cached, so a provider blip can't freeze a "no results"
+answer for hours.
 
 **Location-biased search (2026-11):** when the rider has a GPS fix the map search sends `lat`/`lng`
 along with `q`; the proxy boxes the query to ±35 km around the rider (`viewbox` + `bounded=1`,
@@ -238,12 +267,13 @@ change or >~110 m origin movement. Failures (demo server down, `NoRoute`) surfac
 | Traffic cameras / ALPR | DeFlock · OpenStreetMap (keyless, synced) → optional municipal provider | **Live** — 145,091 ALPR cameras synced (116,502 Flock Safety) |
 | Road hazards | Community reports (DB) | Live |
 | Road closures | Community reports (DB) | Live |
-| Charging stations | Overpass `overpass.osm.ch` (OSM POIs) | Live (verified) |
+| Charging stations | Overpass global mirror chain (`overpass-api.de` → `maps.mail.ru` → `kumi.systems`) | Live (verified) — regional `osm.ch` extract removed (it returned empty outside Switzerland) |
 | Legal riding areas | Community reports (DB) | Live |
 | Police activity | Community reports (transient, 2 h auto-expiry) | Live — no live law-enforcement feed exists or is used (by design) |
 | Aviation awareness | OpenSky Network anonymous | Live (verified) |
 | Public safety announcements | NWS active alerts (synced to DB) | Live (verified) |
-| Map search / reverse geocode | Nominatim (server-proxied, cached) — **location-biased since 2026-11** (±35 km box + distance sort when the rider has a GPS fix) | Live (verified) |
+| Map search / reverse geocode | Nominatim **+ Photon** merge (server-proxied, cached) — **brand-POI + apostrophe-variant aware since 2026-11** ("smiths" → Smith's supermarkets, "mcdonalds" → McDonald's) | Live (verified) |
+| Nearby category browse | `/api/external/pois` — Nominatim category words + Photon brand fan-out, OSM-type-filtered, ≤30 km, distance-sorted | Live (verified) — Food/Coffee/Groceries/Fuel/ATM/Hotel chips |
 | Fastest routes / navigation | OSRM public demo (car profile, `alternatives=2`), server-proxied + 10 min cache | Live (verified) — honest `unavailable` on `NoRoute`/outage, geometry never invented |
 | Database | Supabase Postgres (production) / Prisma SQLite (this deployment) | Supabase: migrations + RLS provided, awaiting project keys |
 

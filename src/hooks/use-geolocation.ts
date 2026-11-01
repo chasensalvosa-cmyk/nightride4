@@ -105,7 +105,10 @@ export function useGeolocation(options: Options = {}) {
     watchIdRef.current = navigator.geolocation.watchPosition(
       handlePosition,
       handleError,
-      { enableHighAccuracy, maximumAge: 2000, timeout: 15000 },
+      // maximumAge: 0 — never render a stale cached fix; GPS accuracy
+      // improves as fresh fixes stream in (first fix is often Wi-Fi based,
+      // off by a neighborhood).
+      { enableHighAccuracy, maximumAge: 0, timeout: 20000 },
     )
   }, [enableHighAccuracy, handlePosition, handleError])
 
@@ -130,7 +133,7 @@ export function useGeolocation(options: Options = {}) {
           handleError(err)
           resolve(null)
         },
-        { enableHighAccuracy, timeout: 12000, maximumAge: 5000 },
+        { enableHighAccuracy, timeout: 15000, maximumAge: 0 },
       )
     })
   }, [enableHighAccuracy, handlePosition, handleError])

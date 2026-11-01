@@ -7,7 +7,7 @@
 // a stable imperative API published through MapContext.
 
 import { useEffect, useRef } from 'react'
-import { Map as MLMap, Marker, ScaleControl, setWorkerUrl } from 'maplibre-gl'
+import { Map as MLMap, Marker, ScaleControl, GeoJSONSource, setWorkerUrl } from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { resolveMapStyle } from '@/services/map/mapStyle'
 import { MapContext, type MapApi } from './map-context'
@@ -34,8 +34,10 @@ export interface MapContainerProps {
   onMoveEnd?: (view: MapViewState, bounds: MapBounds) => void
   onMapError?: (message: string) => void
   onReady?: (map: MLMap) => void
-  /** show the permission-gated user location dot */
-  userLocation: { lat: number; lng: number } | null
+  /** show the permission-gated user location dot (accuracy in meters
+   *  renders the true-scale uncertainty circle — a Wi-Fi fix honestly shows
+   *  a large circle, GPS a tight one) */
+  userLocation: { lat: number; lng: number; accuracy?: number } | null
   children?: React.ReactNode
 }
 
@@ -50,7 +52,7 @@ export default function MapContainer({
   const containerRef = useRef<HTMLDivElement>(null)
   const mapRef = useRef<MLMap | null>(null)
   const userMarkerRef = useRef<Marker | null>(null)
-  const userLocationRef = useRef<{ lat: number; lng: number } | null>(null)
+  const userLocationRef = useRef<{ lat: number; lng: number; accuracy?: number } | null>(null)
   const callbacksRef = useRef({ onMapClick, onMoveEnd, onMapError, onReady })
   callbacksRef.current = { onMapClick, onMoveEnd, onMapError, onReady }
 
@@ -86,6 +88,11 @@ export default function MapContainer({
         canvasContextAttributes: { antialias: true },
       })
       mapRef.current = map
+      // Dev diagnostics: inspect the live engine from the browser console
+      // (window.__nrMap.getLayer('nightride-user-accuracy'), …).
+      if (process.env.NODE_ENV !== 'production') {
+        ;(window as unknown as Record<string, unknown>).__nrMap = map
+      }
 
       map.addControl(new ScaleControl({ maxWidth: 90, unit: 'metric' }), 'bottom-left')
 
@@ -141,26 +148,103 @@ export default function MapContainer({
   }, [])
 
   // User location dot — rendered ONLY when a real fix exists (permission first).
-  // Red dot + soft halo; updated live by the watcher.
+  // Red dot + soft halo + a true-scale accuracy circle whose radius in meters
+  // is converted to screen pixels by a zoom-aware expression (web-mercator:
+  // m/px = 40075016.686 · cos(lat) / (512 · 2^zoom), 78271.484 ≈ 40075016.686/512).
+  // Updated live by the watcher — the dot refines as GPS converges.
+  const ACCURACY_LAYER = 'nightride-user-accuracy'
+
   const syncUserMarker = (map: MLMap | null) => {
     if (!map) return
     const loc = userLocationRef.current
     if (!loc) {
       userMarkerRef.current?.remove()
       userMarkerRef.current = null
+      if (map.getSource(ACCURACY_LAYER)) {
+        (map.getSource(ACCURACY_LAYER) as GeoJSONSource).setData({
+          type: 'FeatureCollection',
+          features: [],
+        })
+      }
       return
     }
+
+    // Accuracy circle beneath the dot (honest uncertainty: a Wi-Fi/network
+    // fix shows a wide circle, a GPS fix a tight one). Source/layer ops
+    // throw before the style finishes loading — the 'load' handler re-applies
+    // whatever fix is current, so skipping here is safe.
+    const circleFeature = {
+      type: 'Feature' as const,
+      geometry: { type: 'Point' as const, coordinates: [loc.lng, loc.lat] },
+      properties: {
+        accuracy: loc.accuracy,
+        latScale: Math.cos((loc.lat * Math.PI) / 180),
+      },
+    }
+    try {
+      if (typeof loc.accuracy === 'number' && loc.accuracy > 0 && map.isStyleLoaded()) {
+        // Source first (data refreshes on every fix), then the layer if it is
+        // not up yet — checking the LAYER (not the source) as the init test
+        // makes this recover from a partial add instead of getting stuck.
+        if (!map.getSource(ACCURACY_LAYER)) {
+          map.addSource(ACCURACY_LAYER, {
+            type: 'geojson',
+            data: { type: 'FeatureCollection', features: [circleFeature] },
+          })
+        } else {
+          ;(map.getSource(ACCURACY_LAYER) as GeoJSONSource).setData(circleFeature)
+        }
+        if (!map.getLayer(ACCURACY_LAYER)) {
+          map.addLayer({
+            id: ACCURACY_LAYER,
+            type: 'circle',
+            source: ACCURACY_LAYER,
+            paint: {
+              'circle-color': '#FF3B30',
+              'circle-opacity': 0.08,
+              'circle-stroke-color': 'rgba(255, 59, 48, 0.35)',
+              'circle-stroke-width': 1,
+              'circle-pitch-alignment': 'map',
+              // True-scale radius: r(zoom) = accuracy · 2^zoom / (78271.484 ·
+              // cos(lat)). MapLibre only allows `zoom` inside interpolate/step,
+              // and interpolate CLAMPS outside its stop range — so the stops
+              // must span the whole zoom range (0…22). An exponential-base-2
+              // interpolation between two stops whose values differ by exactly
+              // 2^22 reproduces the continuous 2^zoom curve exactly. accuracy
+              // and latScale come from the feature, so improved GPS fixes just
+              // need setData.
+              'circle-radius': [
+                'interpolate', ['exponential', 2], ['zoom'],
+                0, ['/', ['get', 'accuracy'], ['*', 78271.484, ['get', 'latScale']]],
+                22, ['/', ['*', ['get', 'accuracy'], 4194304], ['*', 78271.484, ['get', 'latScale']]],
+              ],
+            },
+          })
+        }
+      }
+    } catch (err) {
+      // Surface the failure — a swallowed error here permanently skips the
+      // accuracy circle (the else-branch below only refreshes data).
+      console.error('[NIGHTRIDE] accuracy circle not applied:', err)
+    }
+
     if (!userMarkerRef.current) {
       const el = document.createElement('div')
       el.className = 'flex flex-col items-center'
       el.setAttribute('role', 'img')
-      el.setAttribute('aria-label', 'Your current location')
+      const accuracy = typeof loc.accuracy === 'number' ? Math.round(loc.accuracy) : null
+      el.setAttribute('aria-label', `Your current location${accuracy ? ` (±${accuracy} m)` : ''}`)
+      el.title = accuracy ? `Your location · ±${accuracy} m` : 'Your current location'
       el.innerHTML =
         '<div class="nr-userdot-halo"></div><div class="nr-userdot" style="margin-top:-15px"></div>'
       userMarkerRef.current = new Marker({ element: el })
         .setLngLat([loc.lng, loc.lat])
         .addTo(map)
     } else {
+      const el = userMarkerRef.current.getElement()
+      const accuracy = typeof loc.accuracy === 'number' ? Math.round(loc.accuracy) : null
+      el.setAttribute('aria-label', `Your current location${accuracy ? ` (±${accuracy} m)` : ''}`)
+      el.title = accuracy ? `Your location · ±${accuracy} m` : 'Your current location'
       userMarkerRef.current.setLngLat([loc.lng, loc.lat])
     }
   }

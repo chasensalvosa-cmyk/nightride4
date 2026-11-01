@@ -8,6 +8,11 @@
 // places closest to the rider, then sorted by real great-circle distance.
 // If the strict box finds nothing, the same box demotes to a rank hint
 // (bounded=0) so obscure names still resolve — honestly, further away.
+//
+// Brand-name quirk: Nominatim matches literal names — "mcdonalds" finds
+// nothing while "McDonald's" works, "smiths" returns a locality while
+// "Smith's" returns the supermarkets. Queries without an apostrophe are
+// automatically retried with one inserted before a trailing "s".
 
 import { fetchJson } from './http'
 import { bboxAround, haversineMeters } from '@/lib/geo'
@@ -75,22 +80,63 @@ function toMatches(places: NominatimPlace[]): GeocodeMatch[] {
     .filter((r): r is GeocodeMatch => r !== null)
 }
 
+/** "mcdonalds" → "mcdonald's", "smiths" → "smith's"; null when the query
+ *  already has an apostrophe or no trailing s to split. */
+function apostropheVariant(query: string): string | null {
+  if (query.includes("'")) return null
+  const m = query.match(/^(.{2,}?[a-zA-Z])s$/)
+  if (!m) return null
+  return `${m[1]}'s`
+}
+
+/** One bounded search inside the rider's ±35 km box (no fallbacks).
+ *  Nominatim ranks by relevance, not proximity — category browse passes a
+ *  higher limit so the caller's distance sort has near candidates to find. */
+export async function searchBounded(
+  query: string,
+  near: { lat: number; lng: number },
+  limit = 8,
+): Promise<GeocodeMatch[]> {
+  const l = Math.min(Math.max(Math.trunc(limit), 1), 50)
+  const base = `${BASE_URL}/search?q=${encodeURIComponent(query)}&format=json&limit=${l}&addressdetails=1`
+  const b = bboxAround(near.lat, near.lng, 35000)
+  const viewbox = `&viewbox=${b.minLng},${b.minLat},${b.maxLng},${b.maxLat}`
+  const places = await search(`${base}${viewbox}&bounded=1`)
+  return toMatches(places)
+}
+
 export async function geocode(
   query: string,
   near?: { lat: number; lng: number },
 ): Promise<GeocodeMatch[]> {
   const base = `${BASE_URL}/search?q=${encodeURIComponent(query)}&format=json&limit=8&addressdetails=1`
+  const variant = apostropheVariant(query)
 
-  let places: NominatimPlace[]
+  let places: NominatimPlace[] = []
   if (near) {
     const b = bboxAround(near.lat, near.lng, 35000)
     const viewbox = `&viewbox=${b.minLng},${b.minLat},${b.maxLng},${b.maxLat}`
     places = await search(`${base}${viewbox}&bounded=1`)
     if (places.length === 0) {
+      // Demote the box to a rank hint so obscure names still resolve —
+      // honestly, further away.
       places = await search(`${base}${viewbox}&bounded=0`)
+    }
+    if (variant && places.length < 8) {
+      // Brand punctuation pool: "smiths" alone can surface a *locality*
+      // named Smiths; "Smith's" surfaces the supermarkets. Pool both.
+      const variantPlaces = await search(
+        `${BASE_URL}/search?q=${encodeURIComponent(variant)}&format=json&limit=8&addressdetails=1${viewbox}&bounded=1`,
+      )
+      places = dedupePlaces([...variantPlaces, ...places])
     }
   } else {
     places = await search(base)
+    if (variant && places.length === 0) {
+      places = await search(
+        `${BASE_URL}/search?q=${encodeURIComponent(variant)}&format=json&limit=8&addressdetails=1`,
+      )
+    }
   }
 
   const matches = toMatches(places)
@@ -101,6 +147,16 @@ export async function geocode(
     matches.sort((a, b) => (a.distanceMeters ?? 0) - (b.distanceMeters ?? 0))
   }
   return matches
+}
+
+/** Same place from original + variant queries → keep one (prefer the first). */
+function dedupePlaces(places: NominatimPlace[]): NominatimPlace[] {
+  const seen = new Set<number>()
+  return places.filter((p) => {
+    if (seen.has(p.place_id)) return false
+    seen.add(p.place_id)
+    return true
+  })
 }
 
 export async function reverseGeocode(
